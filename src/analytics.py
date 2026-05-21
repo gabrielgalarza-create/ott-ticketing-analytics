@@ -263,11 +263,13 @@ def comparable_curve(tickets: pd.DataFrame, event_row: pd.Series, n_recent: int 
     name = event_row.get("event_name")
     now = pd.Timestamp.now(tz="UTC")
 
-    # Match by event_base_id first (most reliable for recurring series), fall back to name
+    # Match by event_base_id, exact name, OR same-series token overlap (e.g., both contain "Fit Fest")
+    target_tokens = _series_tokens(name or "")
+    series_match = tickets["event_name"].apply(lambda n: bool(target_tokens & _series_tokens(n or "")))
     past = tickets[
         (tickets["instance_key"] != target_key) &
         (tickets["event_instance_date"] < now) &
-        ((tickets["event_base_id"] == base_id) | (tickets["event_name"] == name))
+        ((tickets["event_base_id"] == base_id) | (tickets["event_name"] == name) | series_match)
     ]
     if past.empty:
         return pd.DataFrame()
@@ -322,16 +324,27 @@ def pace_flag(event_row: pd.Series, comparable: pd.DataFrame) -> tuple[str, str]
     return ("on_pace", f"{actual_pct:.0f}% sold vs ~{expected_pct:.0f}% historical")
 
 
+def _series_tokens(name: str) -> set[str]:
+    """Loose tokens for matching same-series events ('Fit Fest', 'Blend', 'Yacht', ...)."""
+    if not name:
+        return set()
+    stop = {"the", "and", "of", "a", "in", "for", "on", "to", "with", "edition", "weekend",
+            "party", "series", "day", "night", "@", "&"}
+    tokens = {t.strip(":-,.").lower() for t in name.split() if len(t) > 2}
+    return {t for t in tokens if t not in stop}
+
+
 def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
-                           price_band_pct: float = 0.5, min_final: int = 200) -> dict:
+                           price_band_pct: float = 0.6, min_final: int = 150) -> dict:
     """Forecast the final ticket count for an upcoming event using comparable past events.
 
-    Method: find past events at similar price points (±price_band_pct of this event's mode price)
-    that finished with ≥min_final tickets. For each, compute what % of their final total had sold
-    by the same days-out as this event. Apply the inverse to project final sales.
+    Method: find past comparable paid events (same series by name overlap, OR within
+    ±price_band_pct of this event's mode price, with ≥min_final tickets). For each, compute
+    how many tickets they sold from `days_out` onward (= final − cum_at_stage). Forecast =
+    current_sold + median(tickets_remaining). This works even when comparables hadn't started
+    selling yet at this days-out — they simply contribute their full final as "remaining."
 
-    Returns {"forecast": int, "low": int, "high": int, "comparables": [...], "median_pct_at_stage": float}
-    or {"forecast": None, "reason": str} if there's not enough data.
+    Returns {"forecast", "low", "high", "comparables": [...], "method"} or {"forecast": None, "reason"}.
     """
     if tickets.empty:
         return {"forecast": None, "reason": "no historical data"}
@@ -344,6 +357,7 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
 
     now = pd.Timestamp.now(tz="UTC")
     target_key = event_row["instance_key"]
+    target_name = event_row.get("event_name", "")
 
     # Mode price for this event
     this_event = tickets[tickets["instance_key"] == target_key]
@@ -353,8 +367,9 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
     if mode_prices.empty:
         return {"forecast": None, "reason": "free events not forecastable"}
     target_price = float(mode_prices.mode().iloc[0])
+    target_tokens = _series_tokens(target_name)
 
-    # Comparable: past events with mode price within band AND ≥min_final tickets
+    # Build comparables: past paid events, ≥min_final tickets, EITHER same-series OR price-band
     past = tickets[(tickets["event_instance_date"] < now) & (~tickets["is_free"])]
     if past.empty:
         return {"forecast": None, "reason": "no past paid events"}
@@ -365,52 +380,53 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         mode_price=("event_price_amount", lambda s: s.mode().iloc[0]),
     ).reset_index()
     lo, hi = target_price * (1 - price_band_pct), target_price * (1 + price_band_pct)
-    comparable = meta[(meta["mode_price"] >= lo) & (meta["mode_price"] <= hi) & (meta["sold"] >= min_final)]
-    if comparable.empty:
+    in_price_band = (meta["mode_price"] >= lo) & (meta["mode_price"] <= hi)
+    same_series = meta["name"].apply(lambda n: bool(target_tokens & _series_tokens(n)))
+    eligible = meta[(in_price_band | same_series) & (meta["sold"] >= min_final)].copy()
+    if eligible.empty:
         return {"forecast": None, "reason": f"no past events in price band ${lo:.0f}-${hi:.0f} with ≥{min_final} tickets"}
+    eligible["same_series"] = eligible["name"].apply(lambda n: bool(target_tokens & _series_tokens(n)))
 
-    # For each comparable, what % of final was sold by days_out?
-    pcts = []
+    # For each comparable: tickets sold from days_out onward = final - cum_at_stage
+    remaining_vals = []
     used = []
-    for _, c in comparable.iterrows():
+    for _, c in eligible.iterrows():
         curve = sales_curve(tickets, c["instance_key"])
         if curve.empty:
             continue
-        final = curve["tickets_cum"].iloc[-1]
+        final = int(curve["tickets_cum"].iloc[-1])
         if final <= 0:
             continue
         at_stage = curve[curve["days_before_event"] >= days_out]
-        if at_stage.empty:
-            continue  # event hadn't started selling by then — not a valid comparable
-        pct = at_stage["tickets_cum"].max() / final * 100
-        if pct <= 0:
-            continue  # zero sales by this point — not informative
-        pcts.append(pct)
-        used.append({"name": c["name"], "date": c["date"], "final": int(final),
-                     "mode_price": float(c["mode_price"]), "pct_at_stage": round(pct, 1)})
+        cum_at_stage = int(at_stage["tickets_cum"].max()) if not at_stage.empty else 0
+        remaining = final - cum_at_stage
+        remaining_vals.append(remaining)
+        used.append({
+            "name": c["name"], "date": c["date"], "final": final,
+            "mode_price": float(c["mode_price"]),
+            "cum_at_stage": cum_at_stage,
+            "pct_at_stage": round(cum_at_stage / final * 100, 1),
+            "remaining_from_stage": remaining,
+            "same_series": bool(c["same_series"]),
+        })
 
-    if not pcts:
-        return {"forecast": None, "reason": "no comparable events had started selling by this days-out"}
+    if not remaining_vals:
+        return {"forecast": None, "reason": "no usable comparables"}
 
-    # Use median (robust to outliers like an over-promoted event that pre-sold most tickets)
     import statistics
-    pcts_sorted = sorted(pcts)
-    median_pct = statistics.median(pcts_sorted)
-    # Inverse: smaller pct_at_stage means more growth ahead → larger forecast
-    forecast = current_sold / (median_pct / 100)
-    # Range: use 25th and 75th percentile of pcts
-    n = len(pcts_sorted)
-    p25 = pcts_sorted[max(0, n // 4)]
-    p75 = pcts_sorted[min(n - 1, (3 * n) // 4)]
-    high_forecast = current_sold / (p25 / 100)  # smaller pct → more remaining → bigger final
-    low_forecast = current_sold / (p75 / 100)
+    remaining_sorted = sorted(remaining_vals)
+    median_remaining = statistics.median(remaining_sorted)
+    n = len(remaining_sorted)
+    p25 = remaining_sorted[max(0, n // 4)]
+    p75 = remaining_sorted[min(n - 1, (3 * n) // 4)]
+
     return {
-        "forecast": int(round(forecast)),
-        "low": int(round(low_forecast)),
-        "high": int(round(high_forecast)),
-        "median_pct_at_stage": round(median_pct, 1),
-        "n_comparables": len(pcts),
-        "comparables": used,
+        "forecast": int(current_sold + median_remaining),
+        "low": int(current_sold + p25),
+        "high": int(current_sold + p75),
+        "median_remaining": int(median_remaining),
+        "n_comparables": len(remaining_vals),
+        "comparables": sorted(used, key=lambda c: (not c["same_series"], -c["final"])),
         "target_price": target_price,
         "price_band": (round(lo, 0), round(hi, 0)),
     }
