@@ -37,7 +37,13 @@ def load_tickets() -> pd.DataFrame:
     df["net_price"] = (df["event_price_amount"] - df["discount_amount"]).clip(lower=0)
     df["is_free"] = df["event_price_amount"] == 0
     # Stable instance key for one specific occurrence of a recurring event
-    df["instance_key"] = df["event_base_id"].astype(str) + "::" + df["event_instance_date"].dt.strftime("%Y-%m-%dT%H:%M:%S").fillna("unknown")
+    # instance_key = event_base_id. Each recurring event gets its own base_id in SweatPals;
+    # reschedules keep the same base_id with a different instance_date — we treat them as
+    # the SAME event, using the max(date) as the canonical date below.
+    df["instance_key"] = df["event_base_id"].astype(str)
+    # Override per-ticket instance_date with the canonical (latest) date for that base_id
+    canonical = df.groupby("event_base_id")["event_instance_date"].transform("max")
+    df["event_instance_date"] = canonical
     df["was_used"] = df["used_at"].notna()
     return df
 
@@ -122,7 +128,7 @@ def load_waitlist() -> pd.DataFrame:
     if df.empty:
         return df
     df["event_instance_date"] = _to_utc(df["event_instance_date"])
-    df["instance_key"] = df["event_id"].astype(str) + "::" + df["event_instance_date"].dt.strftime("%Y-%m-%dT%H:%M:%S").fillna("unknown")
+    df["instance_key"] = df["event_id"].astype(str)
     return df
 
 
@@ -132,10 +138,14 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
         return pd.DataFrame()
     now = now or pd.Timestamp.now(tz="UTC")
 
-    grouped = tickets.groupby(
-        ["instance_key", "event_base_id", "event_name", "event_alias", "event_address_name", "event_instance_date"],
-        dropna=False,
-    ).agg(
+    # Group by instance_key only; take the latest value for metadata fields so reschedules
+    # (where address/name/alias may have changed) collapse correctly into one row.
+    grouped = tickets.sort_values("order_date").groupby("instance_key", dropna=False).agg(
+        event_base_id=("event_base_id", "last"),
+        event_name=("event_name", "last"),
+        event_alias=("event_alias", "last"),
+        event_address_name=("event_address_name", "last"),
+        event_instance_date=("event_instance_date", "last"),
         tickets_sold=("id", "count"),
         paid_tickets=("is_free", lambda s: (~s).sum()),
         free_tickets=("is_free", "sum"),
@@ -157,11 +167,19 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
     )
 
     if not capacities.empty and "instance_key" in capacities.columns:
-        cap = capacities[["instance_key", "capacity"]].copy()
+        cap_cols = ["instance_key", "capacity"]
+        if "target_tickets" in capacities.columns:
+            cap_cols.append("target_tickets")
+        cap = capacities[cap_cols].copy()
         cap["capacity"] = pd.to_numeric(cap["capacity"], errors="coerce")
+        if "target_tickets" in cap.columns:
+            cap["target_tickets"] = pd.to_numeric(cap["target_tickets"], errors="coerce")
         grouped = grouped.merge(cap, on="instance_key", how="left")
     else:
         grouped["capacity"] = pd.NA
+        grouped["target_tickets"] = pd.NA
+    if "target_tickets" not in grouped.columns:
+        grouped["target_tickets"] = pd.NA
     grouped["sell_through_pct"] = (grouped["tickets_sold"] / grouped["capacity"]).where(grouped["capacity"].notna()) * 100
 
     if not waitlist.empty:
@@ -196,6 +214,28 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
     grouped["paid_rate_used"] = paid_rate_list
     grouped["free_rate_used"] = free_rate_list
     grouped["rate_source"] = source_list
+
+    # Forecast final ticket sales (only for upcoming events)
+    forecasts, forecast_lows, forecast_highs, forecast_methods = [], [], [], []
+    for _, r in grouped.iterrows():
+        if r["status"] == "past":
+            forecasts.append(int(r["tickets_sold"]))
+            forecast_lows.append(int(r["tickets_sold"]))
+            forecast_highs.append(int(r["tickets_sold"]))
+            forecast_methods.append("actual")
+        else:
+            fc = forecast_final_tickets(tickets, r)
+            forecasts.append(fc.get("forecast"))
+            forecast_lows.append(fc.get("low"))
+            forecast_highs.append(fc.get("high"))
+            forecast_methods.append(
+                f"median of n={fc['n_comparables']} comparables in ${fc['price_band'][0]:.0f}-${fc['price_band'][1]:.0f} band"
+                if fc.get("forecast") is not None else fc.get("reason", "n/a")
+            )
+    grouped["forecast_final"] = forecasts
+    grouped["forecast_low"] = forecast_lows
+    grouped["forecast_high"] = forecast_highs
+    grouped["forecast_method"] = forecast_methods
 
     return grouped.sort_values("event_instance_date")
 
@@ -280,6 +320,123 @@ def pace_flag(event_row: pd.Series, comparable: pd.DataFrame) -> tuple[str, str]
     if delta > 10:
         return ("ahead", f"{actual_pct:.0f}% sold vs ~{expected_pct:.0f}% historical pace")
     return ("on_pace", f"{actual_pct:.0f}% sold vs ~{expected_pct:.0f}% historical")
+
+
+def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
+                           price_band_pct: float = 0.5, min_final: int = 200) -> dict:
+    """Forecast the final ticket count for an upcoming event using comparable past events.
+
+    Method: find past events at similar price points (±price_band_pct of this event's mode price)
+    that finished with ≥min_final tickets. For each, compute what % of their final total had sold
+    by the same days-out as this event. Apply the inverse to project final sales.
+
+    Returns {"forecast": int, "low": int, "high": int, "comparables": [...], "median_pct_at_stage": float}
+    or {"forecast": None, "reason": str} if there's not enough data.
+    """
+    if tickets.empty:
+        return {"forecast": None, "reason": "no historical data"}
+    days_out = event_row.get("days_until_event")
+    if pd.isna(days_out) or days_out < 0:
+        return {"forecast": None, "reason": "event is past"}
+    current_sold = int(event_row["tickets_sold"])
+    if current_sold == 0:
+        return {"forecast": None, "reason": "no tickets sold yet"}
+
+    now = pd.Timestamp.now(tz="UTC")
+    target_key = event_row["instance_key"]
+
+    # Mode price for this event
+    this_event = tickets[tickets["instance_key"] == target_key]
+    if this_event.empty:
+        return {"forecast": None, "reason": "no ticket data for this event"}
+    mode_prices = this_event[~this_event["is_free"]]["event_price_amount"]
+    if mode_prices.empty:
+        return {"forecast": None, "reason": "free events not forecastable"}
+    target_price = float(mode_prices.mode().iloc[0])
+
+    # Comparable: past events with mode price within band AND ≥min_final tickets
+    past = tickets[(tickets["event_instance_date"] < now) & (~tickets["is_free"])]
+    if past.empty:
+        return {"forecast": None, "reason": "no past paid events"}
+    meta = past.groupby("instance_key").agg(
+        name=("event_name", "first"),
+        date=("event_instance_date", "first"),
+        sold=("id", "count"),
+        mode_price=("event_price_amount", lambda s: s.mode().iloc[0]),
+    ).reset_index()
+    lo, hi = target_price * (1 - price_band_pct), target_price * (1 + price_band_pct)
+    comparable = meta[(meta["mode_price"] >= lo) & (meta["mode_price"] <= hi) & (meta["sold"] >= min_final)]
+    if comparable.empty:
+        return {"forecast": None, "reason": f"no past events in price band ${lo:.0f}-${hi:.0f} with ≥{min_final} tickets"}
+
+    # For each comparable, what % of final was sold by days_out?
+    pcts = []
+    used = []
+    for _, c in comparable.iterrows():
+        curve = sales_curve(tickets, c["instance_key"])
+        if curve.empty:
+            continue
+        final = curve["tickets_cum"].iloc[-1]
+        if final <= 0:
+            continue
+        at_stage = curve[curve["days_before_event"] >= days_out]
+        if at_stage.empty:
+            continue  # event hadn't started selling by then — not a valid comparable
+        pct = at_stage["tickets_cum"].max() / final * 100
+        if pct <= 0:
+            continue  # zero sales by this point — not informative
+        pcts.append(pct)
+        used.append({"name": c["name"], "date": c["date"], "final": int(final),
+                     "mode_price": float(c["mode_price"]), "pct_at_stage": round(pct, 1)})
+
+    if not pcts:
+        return {"forecast": None, "reason": "no comparable events had started selling by this days-out"}
+
+    # Use median (robust to outliers like an over-promoted event that pre-sold most tickets)
+    import statistics
+    pcts_sorted = sorted(pcts)
+    median_pct = statistics.median(pcts_sorted)
+    # Inverse: smaller pct_at_stage means more growth ahead → larger forecast
+    forecast = current_sold / (median_pct / 100)
+    # Range: use 25th and 75th percentile of pcts
+    n = len(pcts_sorted)
+    p25 = pcts_sorted[max(0, n // 4)]
+    p75 = pcts_sorted[min(n - 1, (3 * n) // 4)]
+    high_forecast = current_sold / (p25 / 100)  # smaller pct → more remaining → bigger final
+    low_forecast = current_sold / (p75 / 100)
+    return {
+        "forecast": int(round(forecast)),
+        "low": int(round(low_forecast)),
+        "high": int(round(high_forecast)),
+        "median_pct_at_stage": round(median_pct, 1),
+        "n_comparables": len(pcts),
+        "comparables": used,
+        "target_price": target_price,
+        "price_band": (round(lo, 0), round(hi, 0)),
+    }
+
+
+# Industry benchmarks for impression → ticket-purchase conversion
+# Sourced from Unbounce/Shopify 2026 landing page benchmarks + typical CTR assumptions.
+# These represent IMPRESSION → PURCHASE (not landing-page → purchase). They account for the
+# full funnel: impression → click → landing page → checkout.
+IMPRESSION_CONVERSION = {
+    "cold_paid_social":    0.001,   # 0.1% — cold IG/TikTok ads (1% CTR × ~10% paid LP CVR, weak match)
+    "organic_social":      0.003,   # 0.3% — feed posts to existing followers (warm community)
+    "warm_paid_social":    0.005,   # 0.5% — retargeting + lookalikes for engaged audiences
+    "email_to_list":       0.020,   # 2.0% — email blasts to an opted-in community (22% open × 9% CVR)
+    "blended_typical":     0.004,   # 0.4% — typical OTT-style blended mix
+}
+
+
+def impressions_to_target(current_sold: int, target: int, conversion_rate: float = IMPRESSION_CONVERSION["blended_typical"]) -> dict:
+    """How many impressions are needed to close the gap from current_sold to target."""
+    gap = max(0, target - current_sold)
+    return {
+        "gap": gap,
+        "conversion_rate": conversion_rate,
+        "impressions_needed": int(round(gap / conversion_rate)) if gap and conversion_rate > 0 else 0,
+    }
 
 
 def daily_velocity(tickets: pd.DataFrame, days: int = 30) -> pd.DataFrame:

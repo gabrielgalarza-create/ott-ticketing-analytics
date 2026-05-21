@@ -17,8 +17,9 @@ import plotly.io as pio
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.analytics import (
-    comparable_curve, daily_velocity, event_summary, load_capacities,
-    load_tickets, load_waitlist, pace_flag, sales_curve, show_up_rates,
+    IMPRESSION_CONVERSION, comparable_curve, daily_velocity, event_summary,
+    impressions_to_target, load_capacities, load_tickets, load_waitlist,
+    pace_flag, sales_curve, show_up_rates,
 )
 
 DIST = Path(__file__).resolve().parent.parent / "dist"
@@ -151,6 +152,11 @@ def render() -> str:
         badge_text, badge_color = PACE_BADGE.get(flag, ("—", "#6b7280"))
         cap = int(r["capacity"]) if pd.notna(r["capacity"]) else "—"
         date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %d, %Y")
+        if pd.notna(r["forecast_final"]):
+            fc = f"<b>{int(r['forecast_final'])}</b><br><span class='range'>{int(r['forecast_low'])}–{int(r['forecast_high'])}</span>"
+        else:
+            fc = "—"
+        target = f"{int(r['target_tickets'])}" if pd.notna(r["target_tickets"]) else "—"
         rows_html += f"""
         <tr>
           <td class='ev-name'>{r['event_name']}</td>
@@ -158,6 +164,8 @@ def render() -> str:
           <td class='num'>{int(r['days_until_event'])}</td>
           <td class='num'>{int(r['paid_tickets'])} / {int(r['free_tickets'])}</td>
           <td class='num'><b>{int(r['tickets_sold'])}</b></td>
+          <td class='num forecast'>{fc}</td>
+          <td class='num'>{target}</td>
           <td class='num exp'>{int(r['expected_attendance'])}</td>
           <td class='num'>{cap}</td>
           <td class='num'>{money(r['net_revenue'])}</td>
@@ -165,6 +173,61 @@ def render() -> str:
           <td><span class='badge' style='background:{badge_color}'>{badge_text}</span></td>
           <td class='why'>{reason}</td>
         </tr>"""
+
+    # ---- Target trackers ----
+    target_blocks = []
+    for _, r in upcoming.iterrows():
+        if pd.isna(r["target_tickets"]):
+            continue
+        target = int(r["target_tickets"])
+        sold = int(r["tickets_sold"])
+        days = int(r["days_until_event"])
+        gap = max(0, target - sold)
+        pct_to_target = sold / target * 100
+        forecast_ok = pd.notna(r["forecast_final"]) and r["forecast_final"] >= target
+
+        scenarios = []
+        for label, key in [
+            ("Email blast to community (open list)", "email_to_list"),
+            ("Organic IG/TikTok (warm followers)", "organic_social"),
+            ("Paid social retargeting", "warm_paid_social"),
+            ("Blended typical mix", "blended_typical"),
+            ("Cold paid social ads", "cold_paid_social"),
+        ]:
+            rate = IMPRESSION_CONVERSION[key]
+            r_calc = impressions_to_target(sold, target, rate)
+            scenarios.append((label, rate, r_calc["impressions_needed"]))
+
+        per_day = (gap / days) if days > 0 else gap
+        forecast_text = (
+            f"Forecast pace lands at ~{int(r['forecast_final'])} ({int(r['forecast_low'])}–{int(r['forecast_high'])})"
+            if pd.notna(r["forecast_final"]) else "no forecast yet (need comparable past events)"
+        )
+        verdict = ("✅ on track to hit target" if forecast_ok
+                   else "⚠️ off target — extra marketing push needed")
+        scen_rows = "".join(
+            f"<tr><td>{label}</td><td class='num'>{rate*100:.2f}%</td><td class='num'><b>{imp:,}</b></td></tr>"
+            for label, rate, imp in scenarios
+        )
+        target_blocks.append(f"""
+        <div class="target-card">
+          <h3>{r['event_name']} → target {target:,} tickets</h3>
+          <div class="progress-row">
+            <div class="progress-bar"><div class="progress-fill" style="width:{min(100, pct_to_target):.1f}%"></div></div>
+            <div class="progress-label"><b>{sold:,}</b> / {target:,} ({pct_to_target:.0f}%)</div>
+          </div>
+          <p>{verdict} · {forecast_text}</p>
+          <p><b>{gap:,} more tickets needed in {days} days</b> = {per_day:.0f}/day average</p>
+          <h4>Impressions needed by channel</h4>
+          <table class="scenarios">
+            <thead><tr><th>Channel</th><th>Impression → ticket %</th><th>Impressions needed</th></tr></thead>
+            <tbody>{scen_rows}</tbody>
+          </table>
+          <p class="caption">Conversion rates use 2026 industry benchmarks. Mix channels to hit the goal: e.g. one email + organic posts + paid retargeting is usually most cost-efficient.</p>
+        </div>""")
+    target_trackers_html = (
+        "<h2>Target trackers</h2>" + "".join(target_blocks)
+    ) if target_blocks else ""
 
     # ---- Per-event curves ----
     curves_html = ""
@@ -224,8 +287,24 @@ def render() -> str:
   td {{ padding: 10px 12px; border-top: 1px solid #f1f5f9; }}
   td.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   td.exp {{ font-weight: 700; color: #6366f1; }}
-  td.ev-name {{ font-weight: 600; max-width: 240px; }}
-  td.why {{ color: #64748b; font-size: 12px; max-width: 280px; }}
+  td.forecast {{ font-weight: 700; color: #0891b2; }}
+  td.forecast .range {{ font-weight: 400; color: #64748b; font-size: 11px; }}
+  td.ev-name {{ font-weight: 600; max-width: 220px; }}
+  td.why {{ color: #64748b; font-size: 12px; max-width: 240px; }}
+  .target-card {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+                  padding: 18px 22px; margin-bottom: 16px; }}
+  .target-card h3 {{ margin: 0 0 12px; font-size: 16px; color: #0f172a; }}
+  .target-card h4 {{ margin: 18px 0 8px; font-size: 13px; color: #475569;
+                     text-transform: uppercase; letter-spacing: .03em; }}
+  .target-card p {{ margin: 6px 0; }}
+  .target-card .caption {{ color: #64748b; font-size: 12px; margin-top: 10px; }}
+  .progress-row {{ display: flex; align-items: center; gap: 14px; margin: 8px 0 14px; }}
+  .progress-bar {{ flex: 1; height: 10px; background: #f1f5f9; border-radius: 999px;
+                   overflow: hidden; }}
+  .progress-fill {{ height: 100%; background: linear-gradient(90deg, #6366f1, #0891b2); }}
+  .progress-label {{ font-variant-numeric: tabular-nums; min-width: 130px; text-align: right; }}
+  table.scenarios {{ font-size: 12px; margin-top: 4px; }}
+  table.scenarios th {{ font-size: 10px; }}
   .badge {{ color: #fff; padding: 3px 9px; border-radius: 999px; font-size: 11px;
             font-weight: 700; white-space: nowrap; }}
   .chart-box {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
@@ -248,18 +327,23 @@ def render() -> str:
   <h2>Pipeline health — upcoming events</h2>
   <table>
     <thead><tr>
-      <th>Event</th><th>Date</th><th>Days out</th><th>Paid / Free</th><th>Total</th>
-      <th>Expected attend.</th><th>Capacity</th><th>Revenue</th><th>Waitlist</th>
+      <th>Event</th><th>Date</th><th>Days out</th><th>Paid / Free</th><th>Sold</th>
+      <th>Forecast final</th><th>Target</th>
+      <th>Will show up</th><th>Capacity</th><th>Revenue</th><th>Waitlist</th>
       <th>Pace</th><th>Why</th>
     </tr></thead>
-    <tbody>{rows_html if rows_html else '<tr><td colspan=11 class=empty>No upcoming events on sale.</td></tr>'}</tbody>
+    <tbody>{rows_html if rows_html else '<tr><td colspan=13 class=empty>No upcoming events on sale.</td></tr>'}</tbody>
   </table>
   <div class="note">
-    <b>Expected attendance</b> = paid sold × paid show-up rate + free sold × free show-up rate.
-    OTT historical rates: <b>paid {rates['paid']*100:.0f}%</b> (n={paid_n:,} tickets),
+    <b>Forecast final</b> = projected total ticket sales by event day, based on the median pace of past
+    paid events at a similar price point that finished with ≥200 tickets. Range shows the 25th–75th
+    percentile of those comparables.
+    <br><b>Will show up</b> = paid sold × paid show-up rate + free sold × free show-up rate.
+    OTT historical rates: <b>paid {rates['paid']*100:.0f}%</b> (n={paid_n:,}),
     <b>free {rates['free']*100:.0f}%</b> (n={free_n:,}).
-    <b>Pace</b> compares sell-through vs. past instances of the same series at the same days-out.
+    <br><b>Pace</b> compares sell-through vs. past instances of the same series at the same days-out.
   </div>
+  {target_trackers_html}
 
   <h2>Sales pace — upcoming events</h2>
   {curves_html if curves_html else "<p class='empty'>No upcoming events with sales yet.</p>"}
