@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.analytics import (
     IMPRESSION_CONVERSION, comparable_curve, daily_velocity, event_summary,
-    impressions_to_target, load_capacities, load_tickets, load_waitlist,
-    pace_flag, sales_curve, show_up_rates,
+    forecast_final_tickets, impressions_to_target, load_capacities, load_tickets,
+    load_waitlist, pace_flag, sales_curve, show_up_rates,
 )
 
 DIST = Path(__file__).resolve().parent.parent / "dist"
@@ -209,6 +209,28 @@ def render() -> str:
             f"<tr><td>{label}</td><td class='num'>{rate*100:.2f}%</td><td class='num'><b>{imp:,}</b></td></tr>"
             for label, rate, imp in scenarios
         )
+        # Build the comparables table that powers this forecast
+        fc_detail = forecast_final_tickets(tickets, r)
+        comp_html = ""
+        if fc_detail.get("comparables"):
+            comp_rows = ""
+            for c in fc_detail["comparables"]:
+                star = " ⭐" if c["same_series"] else ""
+                comp_rows += (
+                    f"<tr><td>{c['name']}{star}</td>"
+                    f"<td>{c['date'].strftime('%b %d, %Y')}</td>"
+                    f"<td class='num'>${int(c['mode_price'])}</td>"
+                    f"<td class='num'>{c['final']:,}</td>"
+                    f"<td class='num'>{c['cum_at_stage']:,} ({c['pct_at_stage']:.0f}%)</td>"
+                    f"<td class='num'><b>{c['remaining_from_stage']:,}</b></td></tr>"
+                )
+            comp_html = f"""
+            <h4>Comparables used in this forecast</h4>
+            <table class="scenarios">
+              <thead><tr><th>Past event</th><th>Date</th><th>Price</th><th>Final</th><th>Sold by T-{int(days)}d</th><th>Remaining from this stage</th></tr></thead>
+              <tbody>{comp_rows}</tbody>
+            </table>
+            <p class="caption">⭐ = same series as this event (matched by name keywords). Forecast = current sold ({sold:,}) + median remaining from these comparables ({fc_detail.get('median_remaining', 0):,}) = {fc_detail.get('forecast', 0):,}.</p>"""
         target_blocks.append(f"""
         <div class="target-card">
           <h3>{r['event_name']} → target {target:,} tickets</h3>
@@ -224,6 +246,7 @@ def render() -> str:
             <tbody>{scen_rows}</tbody>
           </table>
           <p class="caption">Conversion rates use 2026 industry benchmarks. Mix channels to hit the goal: e.g. one email + organic posts + paid retargeting is usually most cost-efficient.</p>
+          {comp_html}
         </div>""")
     target_trackers_html = (
         "<h2>Target trackers</h2>" + "".join(target_blocks)
