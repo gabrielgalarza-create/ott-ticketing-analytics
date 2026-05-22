@@ -85,27 +85,87 @@ def build_top_events_chart(tickets: pd.DataFrame) -> str:
 
 
 def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
+    """Per-event sales-pace chart. Renders each individual past comparable as its own trace
+    so the user can click legend entries to toggle them on/off."""
     curve = sales_curve(tickets, row["instance_key"])
     if curve.empty:
         return ""
-    comp = comparable_curve(tickets, row)
+
     fig = go.Figure()
+
+    # 1) This event — always visible, top of legend
     fig.add_trace(go.Scatter(
         x=curve["days_before_event"], y=curve["tickets_cum"],
-        mode="lines+markers", name="This event", line=dict(width=3, color="#6366f1"),
+        mode="lines+markers", name=f"<b>This event ({row['event_name']})</b>",
+        line=dict(width=3, color="#6366f1"),
     ))
-    if not comp.empty and pd.notna(row["capacity"]):
-        comp = comp.copy()
-        comp["expected_tickets"] = comp["tickets_pct_of_final"] / 100 * row["capacity"]
+
+    # 2) Average of comparables (kept for quick reference)
+    comp_avg = comparable_curve(tickets, row)
+    if not comp_avg.empty and pd.notna(row["capacity"]):
+        comp_avg = comp_avg.copy()
+        comp_avg["expected_tickets"] = comp_avg["tickets_pct_of_final"] / 100 * row["capacity"]
         fig.add_trace(go.Scatter(
-            x=comp["days_before_event"], y=comp["expected_tickets"],
-            mode="lines", name="Avg of past comparable runs",
-            line=dict(dash="dash", color="#94a3b8"),
+            x=comp_avg["days_before_event"], y=comp_avg["expected_tickets"],
+            mode="lines", name="Avg of comparable runs",
+            line=dict(dash="dash", color="#0f172a", width=2),
         ))
+
+    # 3) Each individual comparable as its own trace
+    fc = forecast_final_tickets(tickets, row)
+    comparables = fc.get("comparables") or []
+
+    # Color palette: distinctive for same-series, muted gray-tones for the rest
+    SAME_SERIES_COLORS = ["#dc2626", "#ea580c", "#d97706", "#16a34a"]
+    OTHER_COLORS = ["#64748b", "#94a3b8", "#475569", "#334155", "#7c3aed", "#0891b2",
+                    "#be185d", "#a16207", "#15803d", "#1d4ed8"]
+    same_idx = 0
+    other_idx = 0
+
+    for c in comparables:
+        # Need to look up the instance_key for this comparable from the tickets DF
+        match = tickets[
+            (tickets["event_name"] == c["name"]) &
+            (tickets["event_instance_date"] == c["date"])
+        ]
+        if match.empty:
+            continue
+        ikey = match["instance_key"].iloc[0]
+        past_curve = sales_curve(tickets, ikey)
+        if past_curve.empty:
+            continue
+
+        if c["same_series"]:
+            color = SAME_SERIES_COLORS[same_idx % len(SAME_SERIES_COLORS)]
+            same_idx += 1
+            # Same-series events visible by default — they're the most relevant
+            visibility = True
+        else:
+            color = OTHER_COLORS[other_idx % len(OTHER_COLORS)]
+            other_idx += 1
+            visibility = "legendonly"  # hidden until user clicks to show
+
+        date_str = c["date"].strftime("%b %Y")
+        star = "⭐ " if c["same_series"] else ""
+        label = f"{star}{c['name']} · {date_str} · final {c['final']}"
+        fig.add_trace(go.Scatter(
+            x=past_curve["days_before_event"], y=past_curve["tickets_cum"],
+            mode="lines", name=label,
+            line=dict(color=color, width=1.5),
+            visible=visibility,
+        ))
+
     fig.update_xaxes(autorange="reversed", title="Days before event →")
     fig.update_yaxes(title="Cumulative tickets sold")
-    fig.update_layout(height=320, hovermode="x unified",
-                      title=f"{row['event_name']} — sales pace", **CHART_LAYOUT)
+    fig.update_layout(
+        height=420, hovermode="x unified",
+        title=f"{row['event_name']} — sales pace · click legend items to toggle",
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
+                    font=dict(size=11), bgcolor="rgba(255,255,255,0.9)"),
+        margin=dict(l=10, r=10, t=36, b=10),
+        paper_bgcolor="white", plot_bgcolor="#f8fafc",
+        font=dict(family="-apple-system, Segoe UI, Roboto, sans-serif", size=13, color="#1e293b"),
+    )
     return _chart(fig)
 
 
