@@ -135,14 +135,16 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
         skip_series = capacities["marketing_skip"].astype(str).str.strip().str.lower()
         skip_keys = set(capacities.loc[skip_series.isin(("true", "1", "yes", "y")), "instance_key"].astype(str))
 
-    # Build event index
+    # Build event index — include address so location hints like "Sacramento" can match
     ev = tickets.groupby("instance_key", as_index=False).agg(
         event_name=("event_name", "last"),
+        event_address_name=("event_address_name", "last"),
         event_instance_date=("event_instance_date", "last"),
         event_base_id=("event_base_id", "last"),
     )
     ev["series"] = ev["event_name"].apply(_event_series)
     ev = ev.dropna(subset=["series", "event_instance_date"]).sort_values("event_instance_date")
+    ev["search_text"] = (ev["event_name"].fillna("") + " " + ev["event_address_name"].fillna("")).str.lower()
 
     rows = []
     for _, ad in ads.iterrows():
@@ -151,12 +153,14 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
             continue
         name_hint = ad.get("target_name_hint")
 
-        # 1. If a name hint is set, try to match a specific event in the series
+        # 1. If a name hint is set, try to match a specific event in the series.
+        # Hint matches against event_name + event_address_name (e.g. "Sacramento" is in the
+        # venue address but not the event name).
         target = None
         if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
             hint_lower = name_hint.lower()
             same_series = ev[ev["series"] == series]
-            matches = same_series[same_series["event_name"].str.lower().str.contains(hint_lower, regex=False)]
+            matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
             if not matches.empty:
                 # Prefer the next future event among matches; else most recent past
                 future = matches[matches["event_instance_date"] >= ad["date"]]
