@@ -30,8 +30,10 @@ ADSET_RULES: list[tuple[str, str, str | None]] = [
     (r"san\s*jose|#sanjose",                     "blend",         "San Jose"),
     (r"\bsf\b.*the\s*blend|the\s*blend.*\bsf\b|#?san\s*francisco.*coffee|coffee.*#?san\s*francisco",
                                                   "blend",         "San Francisco"),
-    (r"juneteenth",                              "blend",         "Black Joy"),
-    (r"black\s*history|black\s*joy",             "blend",         "Black Joy"),
+    # "Black Joy" hint is for the Feb 21 Black Joy Weekend Blend only.
+    # We do NOT match on "juneteenth" because in captions it refers to the actual June Juneteenth
+    # holiday (the June 20 Blend), not Black Joy Weekend in February.
+    (r"black\s*joy",                             "blend",         "Black Joy"),
     (r"after\s*party",                           "blend",         "After Party"),
 
     # --- Yacht ---

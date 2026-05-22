@@ -19,7 +19,10 @@
       "locationName": "Oakland, California",
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "nerdwalletwealthpartners"
+      ]
     },
     {
       "id": "3898697279486575928",
@@ -41,7 +44,10 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3897925603475059105",
@@ -58,7 +64,8 @@
       "locationName": null,
       "type": "Image",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": []
     },
     {
       "id": "3897780441071313887",
@@ -81,7 +88,13 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "blackhousemusiq",
-      "ownerFullName": null
+      "ownerFullName": null,
+      "coauthorProducers": [
+        "deejay_ec_",
+        "hercules_worldtour",
+        "k.la.v",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3899942405783292648",
@@ -107,7 +120,13 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "adriana_quin",
-      "ownerFullName": "Adriana Quin"
+      "ownerFullName": "Adriana Quin",
+      "coauthorProducers": [
+        "penseeflorist.ca",
+        "moment.us_sfbayarea",
+        "nerdwalletwealthpartners",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3897969366928102619",
@@ -124,7 +143,12 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "bayarea.kulture",
+        "bayfitco",
+        "510society_"
+      ]
     },
     {
       "id": "3899926914371601527",
@@ -141,7 +165,13 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "bayarea.kulture",
+        "midnightrunnerssf",
+        "bayfitco",
+        "510society_"
+      ]
     },
     {
       "id": "3723137731964047723",
@@ -158,7 +188,8 @@
       "locationName": "San Francisco, California",
       "type": "Image",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": []
     },
     {
       "id": "3902439467060055070",
@@ -180,7 +211,10 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "lareinafit_",
-      "ownerFullName": "Vanessa | Founder, La Reina Fit"
+      "ownerFullName": "Vanessa | Founder, La Reina Fit",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3899924764774029490",
@@ -197,7 +231,13 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "mberemoves",
+        "bayarea.kulture",
+        "fitstarrstudio",
+        "jaymeebaaby"
+      ]
     },
     {
       "id": "3897966674762661330",
@@ -217,7 +257,10 @@
       "locationName": "Oakland, California",
       "type": "Sidecar",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3894343348154487602",
@@ -241,7 +284,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3893463623608222215",
@@ -258,7 +304,10 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "veyn_tropicsoul",
-      "ownerFullName": "Veyn 🇻🇮 x 🇻🇬 x 🇰🇳"
+      "ownerFullName": "Veyn 🇻🇮 x 🇻🇬 x 🇰🇳",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3895639226557308853",
@@ -278,7 +327,10 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "kyleculus",
-      "ownerFullName": "Kyle"
+      "ownerFullName": "Kyle",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3894833369444568584",
@@ -295,7 +347,10 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "nerdwalletwealthpartners"
+      ]
     },
     {
       "id": "3895664942021851495",
@@ -312,7 +367,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3894845485034515065",
@@ -333,7 +391,8 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": []
     },
     {
       "id": "3897229085845734276",
@@ -356,7 +415,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "lifebylupe",
-      "ownerFullName": "Lupita Loeza | San Francisco"
+      "ownerFullName": "Lupita Loeza | San Francisco",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3893618046349877597",
@@ -380,7 +442,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "danielazapatagd",
-      "ownerFullName": "Daniela Zapata"
+      "ownerFullName": "Daniela Zapata",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3896524786151027131",
@@ -403,7 +468,13 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "blackhousemusiq",
-      "ownerFullName": null
+      "ownerFullName": null,
+      "coauthorProducers": [
+        "hercules_worldtour",
+        "deejay_ec_",
+        "k.la.v",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3894856964043158949",
@@ -422,7 +493,12 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "_marissamethod",
-      "ownerFullName": null
+      "ownerFullName": null,
+      "coauthorProducers": [
+        "thelastdrip.coffee",
+        "hella.bees",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3888425045483746942",
@@ -441,7 +517,11 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "bayarea.kulture",
+        "thelastdrip.coffee"
+      ]
     },
     {
       "id": "3887760688491155055",
@@ -458,7 +538,10 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3889788257889798365",
@@ -477,7 +560,12 @@
       "locationName": "Oakland, California",
       "type": "Image",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "hella.bees",
+        "bayarea.kulture",
+        "penseeflorist.ca"
+      ]
     },
     {
       "id": "3890424080943665804",
@@ -510,7 +598,11 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "frozenfiddlerose",
-      "ownerFullName": "Rose Crelli Violin | Electric & Acoustic Violinist"
+      "ownerFullName": "Rose Crelli Violin | Electric & Acoustic Violinist",
+      "coauthorProducers": [
+        "hella.bees",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3890728767383521563",
@@ -533,7 +625,13 @@
       "locationName": null,
       "type": "Video",
       "ownerUsername": "blackhousemusiq",
-      "ownerFullName": null
+      "ownerFullName": null,
+      "coauthorProducers": [
+        "k.la.v",
+        "hercules_worldtour",
+        "deejay_ec_",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3892109939666014656",
@@ -554,7 +652,10 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "thelastdrip.coffee"
+      ]
     },
     {
       "id": "3889102988266313527",
@@ -578,7 +679,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "danielazapatagd",
-      "ownerFullName": "Daniela Zapata"
+      "ownerFullName": "Daniela Zapata",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3889326466949071350",
@@ -599,7 +703,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "nerdwalletwealthpartners"
+      ]
     },
     {
       "id": "3890698574870858522",
@@ -622,7 +729,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "lifebylupe",
-      "ownerFullName": "Lupita Loeza | San Francisco"
+      "ownerFullName": "Lupita Loeza | San Francisco",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3901428744586457001",
@@ -639,7 +749,10 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "bayarea.kulture"
+      ]
     },
     {
       "id": "3890533578953343277",
@@ -663,7 +776,12 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "jaymeebaaby",
-      "ownerFullName": "cry baby"
+      "ownerFullName": "cry baby",
+      "coauthorProducers": [
+        "hella.bees",
+        "bayarea.kulture",
+        "overthetopxp"
+      ]
     },
     {
       "id": "3889863294954172164",
@@ -689,7 +807,10 @@
       "locationName": "Oakland, California",
       "type": "Sidecar",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3885486195183080998",
@@ -714,7 +835,10 @@
       "locationName": "W San Francisco",
       "type": "Video",
       "ownerUsername": "itsscarmaa",
-      "ownerFullName": "Carmen 💋"
+      "ownerFullName": "Carmen 💋",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3887770003726917930",
@@ -744,7 +868,10 @@
       "locationName": "Oakland, California",
       "type": "Image",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": [
+        "hella.bees"
+      ]
     },
     {
       "id": "3886915927429446846",
@@ -769,7 +896,10 @@
       "locationName": "San Francisco, California",
       "type": "Video",
       "ownerUsername": "clara3guzman",
-      "ownerFullName": "Clara Guzman🤎"
+      "ownerFullName": "Clara Guzman🤎",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3892590068003362372",
@@ -793,7 +923,10 @@
       "locationName": "W San Francisco",
       "type": "Video",
       "ownerUsername": "wsanfrancisco",
-      "ownerFullName": "W San Francisco"
+      "ownerFullName": "W San Francisco",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3885639721674438286",
@@ -810,7 +943,10 @@
       "locationName": "Oakland, California",
       "type": "Video",
       "ownerUsername": "thedandale",
-      "ownerFullName": "Gabriel | Experience Curator + Tech Professional"
+      "ownerFullName": "Gabriel | Experience Curator + Tech Professional",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     },
     {
       "id": "3886379131097901292",
@@ -831,7 +967,8 @@
       "locationName": null,
       "type": "Sidecar",
       "ownerUsername": "overthetopxp",
-      "ownerFullName": "OTT Community • Elevated Socials & Experiences"
+      "ownerFullName": "OTT Community • Elevated Socials & Experiences",
+      "coauthorProducers": []
     },
     {
       "id": "3896465733324222728",
@@ -858,7 +995,10 @@
       "locationName": "San Francisco, California",
       "type": "Video",
       "ownerUsername": "hezzy2saucy",
-      "ownerFullName": "HEZZY"
+      "ownerFullName": "HEZZY",
+      "coauthorProducers": [
+        "overthetopxp"
+      ]
     }
   ]
 }
