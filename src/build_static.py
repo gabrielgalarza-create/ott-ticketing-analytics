@@ -25,6 +25,9 @@ from src.marketing import (
     attribute_ads_to_events, current_pace, event_marketing_summary, event_marketing_table,
     load_ads, recommended_daily_spend,
 )
+from src.social import (
+    attribute_posts_to_events, load_all_posts, top_posts_for_event, unified_marketing_summary,
+)
 
 DIST = Path(__file__).resolve().parent.parent / "dist"
 
@@ -137,6 +140,83 @@ def build_marketing_block(event_row: pd.Series, marketing_table: pd.DataFrame,
     <p><b>{verdict}</b></p>
     <p class="caption">Recommended pace is anchored to past <b>same-series</b> events ({rec.get('past_events_used', 0)} comparable used). Total needed to close the gap: <b>{rec.get('total_impressions_needed', 0):,} impressions</b> at <b>${rec.get('total_spend_needed', 0):,.0f}</b> over {days} days.</p>
     """
+
+
+def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
+    """Per-event table of impressions across all channels (paid FB + IG organic + TT organic)."""
+    if unified_summary.empty:
+        return "<p class='empty'>No marketing data.</p>"
+    rows = unified_summary[unified_summary["total_impressions"] > 0].copy()
+    if rows.empty:
+        return "<p class='empty'>No attributed impressions yet.</p>"
+    rows = rows.sort_values("event_instance_date", ascending=False)
+
+    body = ""
+    for _, r in rows.iterrows():
+        d = pd.to_datetime(r["event_instance_date"]).strftime("%b %d, %Y")
+        paid_imp = int(r.get("paid_impressions", 0) or 0)
+        paid_spend = float(r.get("paid_spend", 0) or 0)
+        ig_views = int(r.get("instagram_organic_views", 0) or 0)
+        ig_posts = int(r.get("instagram_organic_posts", 0) or 0)
+        tt_views = int(r.get("tiktok_organic_views", 0) or 0)
+        tt_posts = int(r.get("tiktok_organic_posts", 0) or 0)
+        total = int(r["total_impressions"])
+        ipt = r.get("impressions_per_ticket", 0) or 0
+        # Flag events with paid but no organic
+        flag = ""
+        if paid_imp > 0 and ig_views == 0 and tt_views == 0:
+            flag = "<span class='gap-flag' title='No organic content supporting this paid push'>⚠️</span>"
+        body += f"""
+        <tr>
+          <td class='ev-name'>{r['event_name']}</td>
+          <td>{d}</td>
+          <td class='num'>{int(r['tickets_sold']):,}</td>
+          <td class='num'>{paid_imp:,}<br><span class='subnum'>${paid_spend:,.0f}</span></td>
+          <td class='num'>{ig_views:,}<br><span class='subnum'>{ig_posts} post{'s' if ig_posts != 1 else ''}</span></td>
+          <td class='num'>{tt_views:,}<br><span class='subnum'>{tt_posts} video{'s' if tt_posts != 1 else ''}</span></td>
+          <td class='num'><b>{total:,}</b>{flag}</td>
+          <td class='num'>{ipt:.0f}</td>
+        </tr>"""
+    return f"""
+    <table>
+      <thead><tr>
+        <th>Event</th><th>Date</th><th>Tickets</th>
+        <th>Paid FB ads</th><th>IG organic</th><th>TikTok organic</th>
+        <th>Total impressions</th><th>Imp / ticket</th>
+      </tr></thead>
+      <tbody>{body}</tbody>
+    </table>"""
+
+
+def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: int = 5) -> str:
+    """Top performing organic posts for an event."""
+    if attributed_posts.empty:
+        return ""
+    top = top_posts_for_event(attributed_posts, instance_key, n=n)
+    if top.empty:
+        return "<p class='caption'>No organic posts attributed to this event yet.</p>"
+    body = ""
+    for _, p in top.iterrows():
+        d = p["date"].strftime("%b %-d, %Y")
+        ch_label = "Instagram" if p["channel"] == "instagram_organic" else "TikTok"
+        caption_short = (p["caption"][:140] + "…") if len(p["caption"]) > 140 else p["caption"]
+        url_link = f"<a href='{p['url']}' target='_blank' rel='noopener'>view ↗</a>" if p["url"] else ""
+        body += f"""
+        <tr>
+          <td>{ch_label}</td>
+          <td>{d}</td>
+          <td class='num'><b>{int(p['views']):,}</b></td>
+          <td class='num'>{int(p['likes']):,}</td>
+          <td class='num'>{int(p['comments']):,}</td>
+          <td class='post-caption'>{caption_short}</td>
+          <td>{url_link}</td>
+        </tr>"""
+    return f"""
+    <h4>Top organic posts</h4>
+    <table class="scenarios">
+      <thead><tr><th>Channel</th><th>Posted</th><th>Views</th><th>Likes</th><th>Comments</th><th>Caption</th><th></th></tr></thead>
+      <tbody>{body}</tbody>
+    </table>"""
 
 
 def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFrame) -> str:
@@ -417,6 +497,10 @@ def render() -> str:
     attributed_ads = attribute_ads_to_events(ads, tickets, capacities) if not ads.empty else pd.DataFrame()
     ad_summary = event_marketing_summary(attributed_ads)
     marketing_table = event_marketing_table(tickets, ad_summary) if not tickets.empty else pd.DataFrame()
+    # Organic social: IG + TikTok posts attributed to events by caption keyword
+    social_posts = load_all_posts()
+    attributed_posts = attribute_posts_to_events(social_posts, tickets, capacities) if not social_posts.empty else pd.DataFrame()
+    unified_summary = unified_marketing_summary(tickets, attributed_ads, attributed_posts)
 
     updated = pd.Timestamp.now(tz="US/Pacific").strftime("%B %d, %Y at %-I:%M %p PT")
 
@@ -551,6 +635,7 @@ def render() -> str:
           </table>
           <p class="caption">Conversion rates use 2026 industry benchmarks. Mix channels to hit the goal: e.g. one email + organic posts + paid retargeting is usually most cost-efficient.</p>
           {build_marketing_block(r, marketing_table, attributed_ads, target, days)}
+          {build_top_posts_block(attributed_posts, r['instance_key'], n=5)}
           {comp_html}
         </div>""")
     target_trackers_html = (
@@ -585,6 +670,7 @@ def render() -> str:
     marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
     marketing_pace_html = build_marketing_pace_chart(tickets, attributed_ads)
     campaign_breakdown_html = build_campaign_breakdown(attributed_ads)
+    unified_channel_html = build_unified_channel_table(unified_summary)
 
     paid_n, free_n = rates.get("paid_n", 0), rates.get("free_n", 0)
 
@@ -650,6 +736,10 @@ def render() -> str:
   details.campaign-breakdown table th,
   details.campaign-breakdown table td {{ font-size: 12px; padding: 8px 16px; }}
   span.adset {{ color: #64748b; font-size: 11px; font-weight: 400; }}
+  span.subnum {{ color: #94a3b8; font-size: 11px; font-weight: 400; }}
+  span.gap-flag {{ margin-left: 6px; cursor: help; }}
+  td.post-caption {{ max-width: 360px; font-size: 12px; color: #475569;
+                     overflow: hidden; text-overflow: ellipsis; }}
   h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;
         text-transform: uppercase; letter-spacing: .05em; }}
   .badge {{ color: #fff; padding: 3px 9px; border-radius: 999px; font-size: 11px;
@@ -696,12 +786,21 @@ def render() -> str:
   {curves_html if curves_html else "<p class='empty'>No upcoming events with sales yet.</p>"}
 
   <h2>Marketing → sales efficiency</h2>
+
+  <h3>All channels — total impressions per event</h3>
+  {unified_channel_html}
+  <div class="note">
+    Total impressions = <b>paid FB ad impressions</b> + <b>Instagram organic views</b> + <b>TikTok organic views</b>.
+    ⚠️ marks events with paid ad spend but no organic post coverage — a clear "we need to post more" signal.
+    Organic posts are attributed by caption keywords (same rules as ad-set names).
+  </div>
+
+  <h3>Paid efficiency (FB ads only)</h3>
   {marketing_efficiency_html}
   <div class="note">
-    <b>Imp / ticket</b> = total ad impressions ÷ tickets sold for that event (lower = more efficient creative).
+    <b>Imp / ticket</b> = paid ad impressions ÷ tickets sold (lower = more efficient creative).
     <b>CPA</b> = ad spend per ticket sold. <b>ROAS</b> = revenue ÷ ad spend.
-    Campaigns are attributed to events by name matching ("Fit Fest" campaign → Fit Fest events, etc.) with
-    each ad-day going to the next upcoming event in that series. Data source: Windsor.ai → Facebook Ads.
+    Campaigns/ad-sets are attributed by name to event series; data from Windsor.ai → Facebook Ads.
   </div>
 
   <h3>Impressions pace — by event</h3>
