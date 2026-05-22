@@ -21,6 +21,10 @@ from src.analytics import (
     forecast_final_tickets, impressions_to_target, load_capacities, load_tickets,
     load_waitlist, pace_flag, sales_curve, show_up_rates,
 )
+from src.marketing import (
+    attribute_ads_to_events, current_pace, event_marketing_summary, event_marketing_table,
+    load_ads, recommended_daily_spend,
+)
 
 DIST = Path(__file__).resolve().parent.parent / "dist"
 
@@ -82,6 +86,90 @@ def build_top_events_chart(tickets: pd.DataFrame) -> str:
                       yaxis=dict(autorange="reversed"), xaxis=dict(title="Revenue ($)"),
                       **CHART_LAYOUT)
     return _chart(fig)
+
+
+def build_marketing_block(event_row: pd.Series, marketing_table: pd.DataFrame,
+                          attributed_ads: pd.DataFrame, target: int, days: int) -> str:
+    """For an upcoming event with a target, show ad-spend status + recommendation."""
+    if marketing_table.empty or attributed_ads.empty:
+        return ""
+    ff_mkt = marketing_table[marketing_table["instance_key"] == event_row["instance_key"]]
+    if ff_mkt.empty:
+        return ""
+    r = ff_mkt.iloc[0]
+    total_imp = int(r["impressions"])
+    total_spend = float(r["spend"])
+    if total_imp == 0:
+        return "<p class='caption'>No paid ad campaigns yet attributed to this event.</p>"
+
+    pace = current_pace(attributed_ads, event_row["instance_key"], days=7)
+    rec = recommended_daily_spend(event_row, marketing_table, target, days)
+
+    # Build a comparison: current pace vs recommended pace
+    daily_imp_now = pace.get("daily_impressions", 0)
+    daily_spend_now = pace.get("daily_spend", 0)
+    daily_imp_need = rec.get("daily_impressions_needed", 0)
+    daily_spend_need = rec.get("daily_spend_needed", 0) or 0
+    multiplier = (daily_imp_need / daily_imp_now) if daily_imp_now > 0 else None
+
+    verdict = ""
+    if multiplier is None:
+        verdict = "⚠️ No current ad activity — need to start spending now."
+    elif multiplier <= 1.1:
+        verdict = "✅ Current marketing pace matches what's needed to hit target."
+    elif multiplier <= 2:
+        verdict = f"⚠️ Need to roughly DOUBLE current marketing pace ({multiplier:.1f}× current)."
+    else:
+        verdict = f"🔴 Need to {multiplier:.1f}× current marketing pace to hit target."
+
+    return f"""
+    <h4>Marketing spend status (FB ads)</h4>
+    <table class="scenarios">
+      <thead><tr><th>Metric</th><th>So far</th><th>Recent pace (last 7d)</th><th>Needed pace</th></tr></thead>
+      <tbody>
+        <tr><td>Impressions</td><td class='num'>{total_imp:,}</td><td class='num'>{daily_imp_now:,.0f}/day</td><td class='num'><b>{daily_imp_need:,}/day</b></td></tr>
+        <tr><td>Spend</td><td class='num'>${total_spend:,.0f}</td><td class='num'>${daily_spend_now:,.0f}/day</td><td class='num'><b>${daily_spend_need:,.0f}/day</b></td></tr>
+        <tr><td>Tickets sold</td><td class='num'>{int(r['tickets_sold']):,}</td><td class='num'>—</td><td class='num'>target {target:,}</td></tr>
+        <tr><td>CPA so far</td><td class='num'>${r['cpa']:.2f}</td><td class='num'>—</td><td class='num'>historical median ${rec.get('median_cpa', 0):.2f}</td></tr>
+        <tr><td>Impressions/ticket</td><td class='num'>{r['impressions_per_ticket']:.0f}</td><td class='num'>—</td><td class='num'>historical median {rec.get('median_impressions_per_ticket', 0):.0f}</td></tr>
+      </tbody>
+    </table>
+    <p><b>{verdict}</b></p>
+    <p class="caption">Recommended pace is anchored to past <b>same-series</b> events ({rec.get('past_events_used', 0)} comparable used). Total needed to close the gap: <b>{rec.get('total_impressions_needed', 0):,} impressions</b> at <b>${rec.get('total_spend_needed', 0):,.0f}</b> over {days} days.</p>
+    """
+
+
+def build_marketing_efficiency_table(marketing_table: pd.DataFrame) -> str:
+    """Portfolio-level marketing efficiency table (past + upcoming events with ad data)."""
+    if marketing_table.empty:
+        return ""
+    rows = marketing_table[marketing_table["impressions"] > 0].copy()
+    if rows.empty:
+        return "<p class='empty'>No ad-attributed events yet.</p>"
+    rows = rows.sort_values("event_instance_date", ascending=False)
+    body = ""
+    for _, r in rows.iterrows():
+        d = pd.to_datetime(r["event_instance_date"]).strftime("%b %d, %Y")
+        roas = f"{r['roas']:.1f}×" if pd.notna(r['roas']) else "—"
+        body += f"""
+        <tr>
+          <td class='ev-name'>{r['event_name']}</td>
+          <td>{d}</td>
+          <td class='num'>{int(r['impressions']):,}</td>
+          <td class='num'>${r['spend']:,.0f}</td>
+          <td class='num'>{int(r['tickets_sold']):,}</td>
+          <td class='num'>{r['impressions_per_ticket']:.0f}</td>
+          <td class='num'>${r['cpa']:.2f}</td>
+          <td class='num'><b>{roas}</b></td>
+        </tr>"""
+    return f"""
+    <table>
+      <thead><tr>
+        <th>Event</th><th>Date</th><th>Impressions</th><th>Spend</th>
+        <th>Tickets</th><th>Imp / ticket</th><th>CPA</th><th>ROAS</th>
+      </tr></thead>
+      <tbody>{body}</tbody>
+    </table>"""
 
 
 def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
@@ -173,6 +261,10 @@ def render() -> str:
     tickets = load_tickets()
     capacities = load_capacities()
     waitlist = load_waitlist()
+    ads = load_ads()
+    attributed_ads = attribute_ads_to_events(ads, tickets) if not ads.empty else pd.DataFrame()
+    ad_summary = event_marketing_summary(attributed_ads)
+    marketing_table = event_marketing_table(tickets, ad_summary) if not tickets.empty else pd.DataFrame()
 
     updated = pd.Timestamp.now(tz="US/Pacific").strftime("%B %d, %Y at %-I:%M %p PT")
 
@@ -306,6 +398,7 @@ def render() -> str:
             <tbody>{scen_rows}</tbody>
           </table>
           <p class="caption">Conversion rates use 2026 industry benchmarks. Mix channels to hit the goal: e.g. one email + organic posts + paid retargeting is usually most cost-efficient.</p>
+          {build_marketing_block(r, marketing_table, attributed_ads, target, days)}
           {comp_html}
         </div>""")
     target_trackers_html = (
@@ -337,6 +430,7 @@ def render() -> str:
 
     velocity_html = build_velocity_chart(tickets)
     top_html = build_top_events_chart(tickets)
+    marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
 
     paid_n, free_n = rates.get("paid_n", 0), rates.get("free_n", 0)
 
@@ -430,6 +524,15 @@ def render() -> str:
 
   <h2>Sales pace — upcoming events</h2>
   {curves_html if curves_html else "<p class='empty'>No upcoming events with sales yet.</p>"}
+
+  <h2>Marketing → sales efficiency</h2>
+  {marketing_efficiency_html}
+  <div class="note">
+    <b>Imp / ticket</b> = total ad impressions ÷ tickets sold for that event (lower = more efficient creative).
+    <b>CPA</b> = ad spend per ticket sold. <b>ROAS</b> = revenue ÷ ad spend.
+    Campaigns are attributed to events by name matching ("Fit Fest" campaign → Fit Fest events, etc.) with
+    each ad-day going to the next upcoming event in that series. Data source: Windsor.ai → Facebook Ads.
+  </div>
 
   <h2>Sales velocity</h2>
   <div class="chart-box">{velocity_html}</div>
