@@ -139,6 +139,153 @@ def build_marketing_block(event_row: pd.Series, marketing_table: pd.DataFrame,
     """
 
 
+def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFrame) -> str:
+    """Cumulative impressions per event by days-before-event. Each event = its own
+    toggleable trace; same-series matches for any upcoming event are visible by default."""
+    if attributed_ads.empty or tickets.empty:
+        return "<p class='empty'>No ad data to plot.</p>"
+
+    # Series for each upcoming event so we can default-show same-series past events
+    from src.marketing import _event_series
+    now = pd.Timestamp.now(tz="UTC")
+    upcoming_series = set()
+    upcoming_keys = set()
+    for ik in tickets["instance_key"].unique():
+        rows = tickets[tickets["instance_key"] == ik]
+        ev_date = rows["event_instance_date"].iloc[0]
+        if pd.isna(ev_date) or ev_date < now:
+            continue
+        upcoming_keys.add(ik)
+        s = _event_series(rows["event_name"].iloc[0])
+        if s:
+            upcoming_series.add(s)
+
+    # Build per-event cumulative impressions
+    ads = attributed_ads.copy()
+    ads["days_before_event"] = (ads["event_instance_date"] - ads["date"]).dt.days
+    # One row per (instance_key, day_before_event) — sum impressions across campaigns
+    agg = ads.groupby(["instance_key", "event_name", "event_instance_date", "days_before_event"], as_index=False).agg(
+        impressions=("impressions", "sum"), spend=("spend", "sum"),
+    )
+
+    # Color palette
+    UPCOMING_COLORS = ["#6366f1", "#0891b2", "#7c3aed"]
+    SAME_SERIES_COLORS = ["#dc2626", "#ea580c", "#d97706", "#16a34a"]
+    OTHER_COLORS = ["#64748b", "#94a3b8", "#475569", "#334155", "#be185d", "#a16207",
+                    "#15803d", "#1d4ed8", "#0f766e", "#7e22ce"]
+    upcoming_idx = same_idx = other_idx = 0
+
+    fig = go.Figure()
+    # Order: upcoming first, then same-series past, then others. Sort within group by event date desc.
+    events_meta = agg.groupby(["instance_key", "event_name", "event_instance_date"], as_index=False).first()
+    events_meta["is_upcoming"] = events_meta["instance_key"].isin(upcoming_keys)
+    events_meta["series"] = events_meta["event_name"].apply(_event_series)
+    events_meta["is_same_series"] = (~events_meta["is_upcoming"]) & events_meta["series"].isin(upcoming_series)
+    events_meta["sort_key"] = events_meta["is_upcoming"].map({True: 0, False: 1}) * 1_000_000 + \
+                              (~events_meta["is_same_series"]).map({True: 1, False: 0}) * 100_000 + \
+                              events_meta["event_instance_date"].astype("int64") // -10**14
+    events_meta = events_meta.sort_values("sort_key")
+
+    for _, e in events_meta.iterrows():
+        sub = agg[agg["instance_key"] == e["instance_key"]].sort_values("days_before_event", ascending=False)
+        if sub.empty:
+            continue
+        sub["impressions_cum"] = sub["impressions"].cumsum()
+        date_str = pd.to_datetime(e["event_instance_date"]).strftime("%b %Y")
+        if e["is_upcoming"]:
+            color = UPCOMING_COLORS[upcoming_idx % len(UPCOMING_COLORS)]; upcoming_idx += 1
+            visibility = True
+            label = f"⏳ <b>{e['event_name']} ({date_str})</b>"
+        elif e["is_same_series"]:
+            color = SAME_SERIES_COLORS[same_idx % len(SAME_SERIES_COLORS)]; same_idx += 1
+            visibility = True
+            label = f"⭐ {e['event_name']} ({date_str})"
+        else:
+            color = OTHER_COLORS[other_idx % len(OTHER_COLORS)]; other_idx += 1
+            visibility = "legendonly"
+            label = f"{e['event_name']} ({date_str})"
+        fig.add_trace(go.Scatter(
+            x=sub["days_before_event"], y=sub["impressions_cum"],
+            mode="lines", name=label, line=dict(color=color, width=2.2),
+            visible=visibility,
+            hovertemplate="<b>%{fullData.name}</b><br>%{x}d before event<br>%{y:,.0f} impressions<extra></extra>",
+        ))
+
+    fig.update_xaxes(autorange="reversed", title="Days before event →")
+    fig.update_yaxes(title="Cumulative impressions")
+    fig.update_layout(
+        height=440, hovermode="x unified",
+        title="Cumulative ad impressions vs days-before-event · click legend items to toggle",
+        legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
+                    font=dict(size=11), bgcolor="rgba(255,255,255,0.9)"),
+        margin=dict(l=10, r=10, t=36, b=10),
+        paper_bgcolor="white", plot_bgcolor="#f8fafc",
+        font=dict(family="-apple-system, Segoe UI, Roboto, sans-serif", size=13, color="#1e293b"),
+    )
+    return _chart(fig)
+
+
+def build_campaign_breakdown(attributed_ads: pd.DataFrame) -> str:
+    """For each event with ad data, list its contributing campaigns."""
+    if attributed_ads.empty:
+        return "<p class='empty'>No campaign data.</p>"
+
+    # Group by (event, campaign)
+    by_camp = attributed_ads.groupby(
+        ["instance_key", "event_name", "event_instance_date", "campaign"], as_index=False,
+    ).agg(
+        impressions=("impressions", "sum"),
+        spend=("spend", "sum"),
+        clicks=("clicks", "sum"),
+        first_day=("date", "min"),
+        last_day=("date", "max"),
+        ad_days=("date", "nunique"),
+    )
+    by_camp["share_of_event"] = by_camp.groupby("instance_key")["impressions"].transform(lambda s: s / s.sum() * 100)
+    by_camp["cpm"] = (by_camp["spend"] / by_camp["impressions"] * 1000).where(by_camp["impressions"] > 0)
+    by_camp["ctr"] = (by_camp["clicks"] / by_camp["impressions"] * 100).where(by_camp["impressions"] > 0)
+
+    # Render: one collapsible block per event (newest first)
+    events = by_camp.sort_values("event_instance_date", ascending=False)["instance_key"].drop_duplicates().tolist()
+    blocks = []
+    for ik in events:
+        ev_camps = by_camp[by_camp["instance_key"] == ik].sort_values("impressions", ascending=False)
+        if ev_camps.empty:
+            continue
+        meta = ev_camps.iloc[0]
+        date_str = pd.to_datetime(meta["event_instance_date"]).strftime("%b %d, %Y")
+        total_imp = int(ev_camps["impressions"].sum())
+        total_spend = float(ev_camps["spend"].sum())
+        rows_html = ""
+        for _, c in ev_camps.iterrows():
+            d_from = c["first_day"].strftime("%b %-d")
+            d_to = c["last_day"].strftime("%b %-d")
+            ctr_txt = f"{c['ctr']:.2f}%" if pd.notna(c["ctr"]) else "—"
+            rows_html += f"""
+            <tr>
+              <td>{c['campaign']}</td>
+              <td>{d_from} – {d_to}</td>
+              <td class='num'>{int(c['ad_days'])}</td>
+              <td class='num'>{int(c['impressions']):,}</td>
+              <td class='num'><b>{c['share_of_event']:.0f}%</b></td>
+              <td class='num'>${c['spend']:,.0f}</td>
+              <td class='num'>{ctr_txt}</td>
+            </tr>"""
+        blocks.append(f"""
+        <details class="campaign-breakdown">
+          <summary>
+            <b>{meta['event_name']}</b> &nbsp;·&nbsp; {date_str}
+            &nbsp;·&nbsp; {total_imp:,} impressions &nbsp;·&nbsp; ${total_spend:,.0f} spend
+            &nbsp;·&nbsp; {len(ev_camps)} campaign{'s' if len(ev_camps) != 1 else ''}
+          </summary>
+          <table class="scenarios">
+            <thead><tr><th>Campaign</th><th>Active</th><th>Days</th><th>Impressions</th><th>Share</th><th>Spend</th><th>CTR</th></tr></thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </details>""")
+    return "".join(blocks)
+
+
 def build_marketing_efficiency_table(marketing_table: pd.DataFrame) -> str:
     """Portfolio-level marketing efficiency table (past + upcoming events with ad data)."""
     if marketing_table.empty:
@@ -431,6 +578,8 @@ def render() -> str:
     velocity_html = build_velocity_chart(tickets)
     top_html = build_top_events_chart(tickets)
     marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
+    marketing_pace_html = build_marketing_pace_chart(tickets, attributed_ads)
+    campaign_breakdown_html = build_campaign_breakdown(attributed_ads)
 
     paid_n, free_n = rates.get("paid_n", 0), rates.get("free_n", 0)
 
@@ -482,6 +631,21 @@ def render() -> str:
   .progress-label {{ font-variant-numeric: tabular-nums; min-width: 130px; text-align: right; }}
   table.scenarios {{ font-size: 12px; margin-top: 4px; }}
   table.scenarios th {{ font-size: 10px; }}
+  details.campaign-breakdown {{ background: #fff; border: 1px solid #e2e8f0;
+                                border-radius: 8px; padding: 0; margin-bottom: 8px; }}
+  details.campaign-breakdown summary {{ cursor: pointer; padding: 12px 16px; font-size: 14px;
+                                        list-style: none; user-select: none; }}
+  details.campaign-breakdown summary::-webkit-details-marker {{ display: none; }}
+  details.campaign-breakdown summary::before {{ content: "▶"; display: inline-block;
+                                                 margin-right: 8px; transition: transform .15s;
+                                                 color: #6366f1; font-size: 11px; }}
+  details.campaign-breakdown[open] summary::before {{ transform: rotate(90deg); }}
+  details.campaign-breakdown[open] summary {{ border-bottom: 1px solid #f1f5f9; }}
+  details.campaign-breakdown table {{ border: none; border-radius: 0; }}
+  details.campaign-breakdown table th,
+  details.campaign-breakdown table td {{ font-size: 12px; padding: 8px 16px; }}
+  h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;
+        text-transform: uppercase; letter-spacing: .05em; }}
   .badge {{ color: #fff; padding: 3px 9px; border-radius: 999px; font-size: 11px;
             font-weight: 700; white-space: nowrap; }}
   .chart-box {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
@@ -533,6 +697,13 @@ def render() -> str:
     Campaigns are attributed to events by name matching ("Fit Fest" campaign → Fit Fest events, etc.) with
     each ad-day going to the next upcoming event in that series. Data source: Windsor.ai → Facebook Ads.
   </div>
+
+  <h3>Impressions pace — by event</h3>
+  <div class="chart-box">{marketing_pace_html}</div>
+
+  <h3>Campaign breakdown — by event</h3>
+  <p class="caption">Click any event to expand its campaign list and see which ads delivered the impressions.</p>
+  {campaign_breakdown_html}
 
   <h2>Sales velocity</h2>
   <div class="chart-box">{velocity_html}</div>
