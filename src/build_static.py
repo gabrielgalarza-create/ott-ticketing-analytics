@@ -230,10 +230,12 @@ def build_campaign_breakdown(attributed_ads: pd.DataFrame) -> str:
     if attributed_ads.empty:
         return "<p class='empty'>No campaign data.</p>"
 
-    # Group by (event, campaign)
-    by_camp = attributed_ads.groupby(
-        ["instance_key", "event_name", "event_instance_date", "campaign"], as_index=False,
-    ).agg(
+    # Group by (event, campaign, ad set) so the breakdown is at the level decisions get made
+    has_adset = "adset_name" in attributed_ads.columns
+    group_cols = ["instance_key", "event_name", "event_instance_date", "campaign"]
+    if has_adset:
+        group_cols.append("adset_name")
+    by_camp = attributed_ads.groupby(group_cols, as_index=False).agg(
         impressions=("impressions", "sum"),
         spend=("spend", "sum"),
         clicks=("clicks", "sum"),
@@ -261,9 +263,10 @@ def build_campaign_breakdown(attributed_ads: pd.DataFrame) -> str:
             d_from = c["first_day"].strftime("%b %-d")
             d_to = c["last_day"].strftime("%b %-d")
             ctr_txt = f"{c['ctr']:.2f}%" if pd.notna(c["ctr"]) else "—"
+            adset_html = f"<br><span class='adset'>↳ {c['adset_name']}</span>" if has_adset and c.get("adset_name") else ""
             rows_html += f"""
             <tr>
-              <td>{c['campaign']}</td>
+              <td><b>{c['campaign']}</b>{adset_html}</td>
               <td>{d_from} – {d_to}</td>
               <td class='num'>{int(c['ad_days'])}</td>
               <td class='num'>{int(c['impressions']):,}</td>
@@ -271,15 +274,17 @@ def build_campaign_breakdown(attributed_ads: pd.DataFrame) -> str:
               <td class='num'>${c['spend']:,.0f}</td>
               <td class='num'>{ctr_txt}</td>
             </tr>"""
+        n_campaigns = ev_camps["campaign"].nunique()
+        n_adsets = ev_camps["adset_name"].nunique() if has_adset else len(ev_camps)
         blocks.append(f"""
         <details class="campaign-breakdown">
           <summary>
             <b>{meta['event_name']}</b> &nbsp;·&nbsp; {date_str}
             &nbsp;·&nbsp; {total_imp:,} impressions &nbsp;·&nbsp; ${total_spend:,.0f} spend
-            &nbsp;·&nbsp; {len(ev_camps)} campaign{'s' if len(ev_camps) != 1 else ''}
+            &nbsp;·&nbsp; {n_campaigns} campaign{'s' if n_campaigns != 1 else ''} / {n_adsets} ad set{'s' if n_adsets != 1 else ''}
           </summary>
           <table class="scenarios">
-            <thead><tr><th>Campaign</th><th>Active</th><th>Days</th><th>Impressions</th><th>Share</th><th>Spend</th><th>CTR</th></tr></thead>
+            <thead><tr><th>Campaign / Ad set</th><th>Active</th><th>Days</th><th>Impressions</th><th>Share</th><th>Spend</th><th>CTR</th></tr></thead>
             <tbody>{rows_html}</tbody>
           </table>
         </details>""")
@@ -409,7 +414,7 @@ def render() -> str:
     capacities = load_capacities()
     waitlist = load_waitlist()
     ads = load_ads()
-    attributed_ads = attribute_ads_to_events(ads, tickets) if not ads.empty else pd.DataFrame()
+    attributed_ads = attribute_ads_to_events(ads, tickets, capacities) if not ads.empty else pd.DataFrame()
     ad_summary = event_marketing_summary(attributed_ads)
     marketing_table = event_marketing_table(tickets, ad_summary) if not tickets.empty else pd.DataFrame()
 
@@ -644,6 +649,7 @@ def render() -> str:
   details.campaign-breakdown table {{ border: none; border-radius: 0; }}
   details.campaign-breakdown table th,
   details.campaign-breakdown table td {{ font-size: 12px; padding: 8px 16px; }}
+  span.adset {{ color: #64748b; font-size: 11px; font-weight: 400; }}
   h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;
         text-transform: uppercase; letter-spacing: .05em; }}
   .badge {{ color: #fff; padding: 3px 9px; border-radius: 999px; font-size: 11px;
