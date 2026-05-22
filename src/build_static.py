@@ -143,7 +143,7 @@ def build_marketing_block(event_row: pd.Series, marketing_table: pd.DataFrame,
 
 
 def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
-    """Per-event table of impressions across all channels (paid FB + IG organic + TT organic)."""
+    """Per-event table of impressions split into Paid / Owned organic / Earned organic."""
     if unified_summary.empty:
         return "<p class='empty'>No marketing data.</p>"
     rows = unified_summary[unified_summary["total_impressions"] > 0].copy()
@@ -156,24 +156,25 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
         d = pd.to_datetime(r["event_instance_date"]).strftime("%b %d, %Y")
         paid_imp = int(r.get("paid_impressions", 0) or 0)
         paid_spend = float(r.get("paid_spend", 0) or 0)
-        ig_views = int(r.get("instagram_organic_views", 0) or 0)
-        ig_posts = int(r.get("instagram_organic_posts", 0) or 0)
-        tt_views = int(r.get("tiktok_organic_views", 0) or 0)
-        tt_posts = int(r.get("tiktok_organic_posts", 0) or 0)
+        owned_v = int(r.get("organic_owned_views", 0) or 0)
+        owned_p = int(r.get("organic_owned_posts", 0) or 0)
+        earned_v = int(r.get("organic_earned_views", 0) or 0)
+        earned_p = int(r.get("organic_earned_posts", 0) or 0)
         total = int(r["total_impressions"])
         ipt = r.get("impressions_per_ticket", 0) or 0
-        # Flag events with paid but no organic
+        # Flag events with paid spend but no owned organic
         flag = ""
-        if paid_imp > 0 and ig_views == 0 and tt_views == 0:
-            flag = "<span class='gap-flag' title='No organic content supporting this paid push'>⚠️</span>"
+        if paid_imp > 0 and owned_v == 0:
+            flag = "<span class='gap-flag' title='Paid ads running but no owned organic posts'>⚠️</span>"
+        earned_pct = f"{earned_v / max(1, owned_v + earned_v) * 100:.0f}%" if (owned_v + earned_v) > 0 else "—"
         body += f"""
         <tr>
           <td class='ev-name'>{r['event_name']}</td>
           <td>{d}</td>
           <td class='num'>{int(r['tickets_sold']):,}</td>
           <td class='num'>{paid_imp:,}<br><span class='subnum'>${paid_spend:,.0f}</span></td>
-          <td class='num'>{ig_views:,}<br><span class='subnum'>{ig_posts} post{'s' if ig_posts != 1 else ''}</span></td>
-          <td class='num'>{tt_views:,}<br><span class='subnum'>{tt_posts} video{'s' if tt_posts != 1 else ''}</span></td>
+          <td class='num'>{owned_v:,}<br><span class='subnum'>{owned_p} post{'s' if owned_p != 1 else ''}</span></td>
+          <td class='num'><span class='earned-cell'>{earned_v:,}</span><br><span class='subnum'>{earned_p} post{'s' if earned_p != 1 else ''} · {earned_pct}</span></td>
           <td class='num'><b>{total:,}</b>{flag}</td>
           <td class='num'>{ipt:.0f}</td>
         </tr>"""
@@ -181,7 +182,8 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
     <table>
       <thead><tr>
         <th>Event</th><th>Date</th><th>Tickets</th>
-        <th>Paid FB ads</th><th>IG organic</th><th>TikTok organic</th>
+        <th>Paid FB ads</th><th>Owned organic<br><span class='subhead'>(OTT posts)</span></th>
+        <th>Earned media<br><span class='subhead'>(others tagging OTT)</span></th>
         <th>Total impressions</th><th>Imp / ticket</th>
       </tr></thead>
       <tbody>{body}</tbody>
@@ -189,34 +191,44 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
 
 
 def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: int = 5) -> str:
-    """Top performing organic posts for an event."""
+    """Top performing organic posts for an event — split into Owned and Earned."""
     if attributed_posts.empty:
         return ""
-    top = top_posts_for_event(attributed_posts, instance_key, n=n)
-    if top.empty:
+    sub = attributed_posts[attributed_posts["instance_key"] == instance_key].copy()
+    if sub.empty:
         return "<p class='caption'>No organic posts attributed to this event yet.</p>"
-    body = ""
-    for _, p in top.iterrows():
-        d = p["date"].strftime("%b %-d, %Y")
-        ch_label = "Instagram" if p["channel"] == "instagram_organic" else "TikTok"
-        caption_short = (p["caption"][:140] + "…") if len(p["caption"]) > 140 else p["caption"]
-        url_link = f"<a href='{p['url']}' target='_blank' rel='noopener'>view ↗</a>" if p["url"] else ""
-        body += f"""
-        <tr>
-          <td>{ch_label}</td>
-          <td>{d}</td>
-          <td class='num'><b>{int(p['views']):,}</b></td>
-          <td class='num'>{int(p['likes']):,}</td>
-          <td class='num'>{int(p['comments']):,}</td>
-          <td class='post-caption'>{caption_short}</td>
-          <td>{url_link}</td>
-        </tr>"""
-    return f"""
-    <h4>Top organic posts</h4>
-    <table class="scenarios">
-      <thead><tr><th>Channel</th><th>Posted</th><th>Views</th><th>Likes</th><th>Comments</th><th>Caption</th><th></th></tr></thead>
-      <tbody>{body}</tbody>
-    </table>"""
+
+    def render_table(rows: pd.DataFrame, title: str, empty_msg: str) -> str:
+        if rows.empty:
+            return f"<h4>{title}</h4><p class='caption'>{empty_msg}</p>"
+        body = ""
+        for _, p in rows.iterrows():
+            d = p["date"].strftime("%b %-d, %Y")
+            ch_label = "IG" if p["channel"] == "instagram_organic" else "TikTok"
+            caption_short = (p["caption"][:140] + "…") if len(p["caption"]) > 140 else p["caption"]
+            url_link = f"<a href='{p['url']}' target='_blank' rel='noopener'>view ↗</a>" if p["url"] else ""
+            owner = f"@{p['owner']}" if p.get("owner") else ""
+            body += f"""
+            <tr>
+              <td>{ch_label}</td>
+              <td>{d}</td>
+              <td>{owner}</td>
+              <td class='num'><b>{int(p['views']):,}</b></td>
+              <td class='num'>{int(p['likes']):,}</td>
+              <td class='post-caption'>{caption_short}</td>
+              <td>{url_link}</td>
+            </tr>"""
+        return f"""
+        <h4>{title}</h4>
+        <table class="scenarios">
+          <thead><tr><th>Ch</th><th>Posted</th><th>Author</th><th>Views</th><th>Likes</th><th>Caption</th><th></th></tr></thead>
+          <tbody>{body}</tbody>
+        </table>"""
+
+    owned = sub[sub["origin"].isin(["owned", "team"])].sort_values("views", ascending=False).head(n)
+    earned = sub[sub["origin"] == "earned"].sort_values("views", ascending=False).head(n)
+    return render_table(owned, "Top owned organic posts", "No owned posts mentioning this event.") + \
+           render_table(earned, "Top earned-media mentions", "No external accounts have posted about this event yet — a clear gap to seed.")
 
 
 def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFrame) -> str:
@@ -740,6 +752,9 @@ def render() -> str:
   span.gap-flag {{ margin-left: 6px; cursor: help; }}
   td.post-caption {{ max-width: 360px; font-size: 12px; color: #475569;
                      overflow: hidden; text-overflow: ellipsis; }}
+  .earned-cell {{ color: #16a34a; font-weight: 700; }}
+  .subhead {{ display: block; font-weight: 400; font-size: 9px; color: #94a3b8;
+              text-transform: none; letter-spacing: 0; }}
   h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;
         text-transform: uppercase; letter-spacing: .05em; }}
   .badge {{ color: #fff; padding: 3px 9px; border-radius: 999px; font-size: 11px;
