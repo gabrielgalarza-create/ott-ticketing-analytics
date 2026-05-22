@@ -23,22 +23,48 @@ ADS_FB_SNAPSHOT = Path(__file__).resolve().parent.parent / "data" / "ads_faceboo
 # narrows to a specific event in that series (e.g. "Sacramento" + "blend" → Sac Blend).
 # The fallback below handles generic ad sets ("the blend" → next "flagship" Blend, etc.).
 ADSET_RULES: list[tuple[str, str, str | None]] = [
-    # Most specific first
-    (r"sacramento",                              "blend",         "Sacramento"),
-    (r"\bsf\b.*the\s*blend|the\s*blend.*\bsf\b", "blend",         "W San Francisco"),
+    # Most specific first. The first matching rule wins, so the order matters.
+
+    # --- Blend location-specific hints (caption mentions a city) ---
+    (r"sacramento|#?\bsac\b",                    "blend",         "Sacramento"),
+    (r"san\s*jose|#sanjose",                     "blend",         "San Jose"),
+    (r"\bsf\b.*the\s*blend|the\s*blend.*\bsf\b|#?san\s*francisco.*coffee|coffee.*#?san\s*francisco",
+                                                  "blend",         "San Francisco"),
     (r"juneteenth",                              "blend",         "Black Joy"),
+    (r"black\s*history|black\s*joy",             "blend",         "Black Joy"),
     (r"after\s*party",                           "blend",         "After Party"),
-    (r"super\s*bowl\s*yacht|yacht",              "yacht",         None),
+
+    # --- Yacht ---
+    (r"#ottyachtparty|#yachtparty|super\s*bowl\s*yacht|yacht\s*party|yacht",
+                                                  "yacht",         None),
+    (r"anniversary\s*yacht",                     "yacht",         None),
+
+    # --- Fit Fest ---
     (r"super\s*bowl\s*fit\s*fest",               "fit fest",      "Super Bowl"),
     (r"world\s*cup",                             "fit fest",      "World Cup"),
+    (r"#sffitfest|#fitfest|#fitnessfestival",    "fit fest",      None),
     (r"fit\s*fest|fitness\s*festival",           "fit fest",      None),
+
+    # --- Tahoe ---
+    (r"#tahoeunscripted|#otttakestahoe",         "tahoe",         None),
     (r"tahoe\s*ski|tahoe",                       "tahoe",         None),
+
+    # --- Other event series ---
     (r"\bgolf\b",                                "golf",          None),
-    (r"brunch.*build|build.*brunch",             "brunch & build",None),
+    (r"brunch.*build|build.*brunch|#brunchandbuild",
+                                                  "brunch & build",None),
     (r"croatia",                                 "_croatia_",     None),
     (r"membership",                              "_membership_",  None),
     (r"pilates",                                 "pilates",       None),
-    # Generic Blend ad sets — fall through to flagship-Blend logic
+
+    # --- Generic Blend keywords (hashtag-driven) ---
+    (r"#theblend|#blendcoffee|#coffeeandrnb|#coffeernb",
+                                                  "blend",         None),
+    # Both #coffee AND #rnb (strong combined signal for Blend) — both hashtags must be present
+    (r"(?=.*#coffee)(?=.*#rnb)",                 "blend",         None),
+    # Phrase "coffee and r&b" or variants
+    (r"coffee\s*(and|&|\+)\s*r&?b",              "blend",         None),
+    # Last fallback: literal "the blend" / "^blend" mention
     (r"the\s*blend|^blend",                      "blend",         None),
 ]
 
@@ -155,7 +181,9 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
 
         # 1. If a name hint is set, try to match a specific event in the series.
         # Hint matches against event_name + event_address_name (e.g. "Sacramento" is in the
-        # venue address but not the event name).
+        # venue address but not the event name). Hint matches bypass the marketing_skip filter
+        # so an explicit caption like "San Jose coffee and r&b" still routes to San Jose Blend
+        # even though San Jose is normally excluded from generic Blend attribution.
         target = None
         if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
             hint_lower = name_hint.lower()
