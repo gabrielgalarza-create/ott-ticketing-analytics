@@ -1,11 +1,14 @@
-"""Ad-campaign analytics — pulls Windsor.ai-sourced Facebook ad data and attributes it to events.
+"""Ad-campaign analytics — pulls Windsor.ai-sourced Facebook ad data and attributes it to events
+at the AD-SET level (not just campaign). Necessary because a single campaign like "P1 - 2025 -
+Purchase Conversion - The Blend" actually runs ad sets for Tahoe, Yacht, Sacramento, SF, etc.
 
 Refresh: ads data is captured to `data/ads_facebook.json` as a snapshot. To refresh, ask Claude
-to re-pull from the Windsor MCP (`get_data` on connector="facebook") and overwrite the snapshot.
+to re-pull from the Windsor MCP (`get_data` on connector="facebook") with adset_name field.
 """
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -15,27 +18,35 @@ from src.analytics import _series_tokens, load_tickets
 ADS_FB_SNAPSHOT = Path(__file__).resolve().parent.parent / "data" / "ads_facebook.json"
 
 
-# Campaign-name keywords → series-token override (when name doesn't trivially match event names)
-CAMPAIGN_SERIES_KEYWORDS = {
-    "blend": "blend",
-    "fit fest": "fit fest",
-    "tahoe": "tahoe",
-    "yacht": "yacht",
-    "brunch and build": "brunch & build",
-    "brunch & build": "brunch & build",
-    "ott membership": "_membership_",
-    "croatia": "_croatia_",
-    "scottsdale": "_scottsdale_",
-    "puerto rico": "_puerto_rico_",
-    "tahoeunscripted": "tahoe",
-    "anniversary": "yacht",
-}
+# Ad-set name patterns → (series, event_name_substr_for_disambiguation_or_None).
+# Matched in order; first hit wins. Series is the event-series token; the optional substring
+# narrows to a specific event in that series (e.g. "Sacramento" + "blend" → Sac Blend).
+# The fallback below handles generic ad sets ("the blend" → next "flagship" Blend, etc.).
+ADSET_RULES: list[tuple[str, str, str | None]] = [
+    # Most specific first
+    (r"sacramento",                              "blend",         "Sacramento"),
+    (r"\bsf\b.*the\s*blend|the\s*blend.*\bsf\b", "blend",         "W San Francisco"),
+    (r"juneteenth",                              "blend",         "Black Joy"),
+    (r"after\s*party",                           "blend",         "After Party"),
+    (r"super\s*bowl\s*yacht|yacht",              "yacht",         None),
+    (r"super\s*bowl\s*fit\s*fest",               "fit fest",      "Super Bowl"),
+    (r"world\s*cup",                             "fit fest",      "World Cup"),
+    (r"fit\s*fest|fitness\s*festival",           "fit fest",      None),
+    (r"tahoe\s*ski|tahoe",                       "tahoe",         None),
+    (r"\bgolf\b",                                "golf",          None),
+    (r"brunch.*build|build.*brunch",             "brunch & build",None),
+    (r"croatia",                                 "_croatia_",     None),
+    (r"membership",                              "_membership_",  None),
+    (r"pilates",                                 "pilates",       None),
+    # Generic Blend ad sets — fall through to flagship-Blend logic
+    (r"the\s*blend|^blend",                      "blend",         None),
+]
 
 
 def load_ads(snapshot_path: Path = ADS_FB_SNAPSHOT) -> pd.DataFrame:
-    """Load FB ad data and return a tidy DataFrame: campaign, date, impressions, spend, clicks, reach."""
+    """Load FB ad data with ad-set granularity."""
     if not snapshot_path.exists():
-        return pd.DataFrame(columns=["campaign", "date", "impressions", "spend", "clicks", "reach"])
+        return pd.DataFrame(columns=["campaign", "adset_name", "date", "impressions", "spend", "clicks", "reach"])
     raw = json.loads(snapshot_path.read_text())
     df = pd.DataFrame(raw.get("result", []))
     if df.empty:
@@ -43,8 +54,33 @@ def load_ads(snapshot_path: Path = ADS_FB_SNAPSHOT) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"], utc=True)
     for col in ("impressions", "spend", "clicks", "reach"):
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["campaign_series"] = df["campaign"].apply(_campaign_series)
+    if "adset_name" not in df.columns:
+        df["adset_name"] = ""
+    df["adset_name"] = df["adset_name"].fillna("").astype(str)
+    # Match each ad row to a (series, name_hint) rule
+    df[["target_series", "target_name_hint"]] = df["adset_name"].apply(
+        lambda s: pd.Series(_classify_adset(s))
+    )
+    # If ad-set didn't match anything, fall back to campaign name
+    fallback_mask = df["target_series"].isna()
+    if fallback_mask.any():
+        df.loc[fallback_mask, "target_series"] = df.loc[fallback_mask, "campaign"].apply(
+            lambda c: _classify_adset(c or "")[0]
+        )
+    df["campaign_series"] = df["target_series"]  # back-compat
     return df
+
+
+def _classify_adset(name: str) -> tuple[str | None, str | None]:
+    n = (name or "").lower()
+    if not n:
+        return (None, None)
+    if "instagram post:" in n:
+        return (None, None)
+    for pattern, series, name_hint in ADSET_RULES:
+        if re.search(pattern, n):
+            return (series, name_hint)
+    return (None, None)
 
 
 def _campaign_series(name: str) -> str | None:
@@ -79,15 +115,27 @@ def _event_series(event_name) -> str | None:
     return None
 
 
-def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame) -> pd.DataFrame:
-    """For each ad-day, attribute spend/impressions to the NEXT future event in that series.
-    Returns a DataFrame: campaign, date, event_name, event_instance_date, event_instance_key,
-    series, impressions, spend, clicks, reach.
+def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
+                            capacities: pd.DataFrame | None = None) -> pd.DataFrame:
+    """For each ad-day, attribute spend/impressions to a specific event.
+
+    Resolution order (per ad-day):
+      1. Ad-set rule with name_hint → match a specific event by substring (e.g.
+         "Sacramento" hint → "Sacramento" in event_name)
+      2. Ad-set rule with no name_hint OR no rule but campaign hints series →
+         next FUTURE event in series that's not marked `marketing_skip` in capacities
+      3. No future event → most recent past event in series
     """
     if ads.empty or tickets.empty:
         return pd.DataFrame()
 
-    # Build event index: one row per event-instance with its series + date
+    # Skip set from capacities.csv
+    skip_keys = set()
+    if capacities is not None and not capacities.empty and "marketing_skip" in capacities.columns:
+        skip_series = capacities["marketing_skip"].astype(str).str.strip().str.lower()
+        skip_keys = set(capacities.loc[skip_series.isin(("true", "1", "yes", "y")), "instance_key"].astype(str))
+
+    # Build event index
     ev = tickets.groupby("instance_key", as_index=False).agg(
         event_name=("event_name", "last"),
         event_instance_date=("event_instance_date", "last"),
@@ -98,21 +146,40 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame) -> pd.Data
 
     rows = []
     for _, ad in ads.iterrows():
-        series = ad["campaign_series"]
+        series = ad.get("target_series") or ad.get("campaign_series")
         if not series:
             continue
-        # Find the next event in that series whose date is on/after this ad day
-        candidates = ev[(ev["series"] == series) & (ev["event_instance_date"] >= ad["date"])]
-        if candidates.empty:
-            # No future event — attribute to the most recent past event in series
-            candidates = ev[ev["series"] == series]
-            if candidates.empty:
-                continue
-            target = candidates.iloc[-1]
-        else:
-            target = candidates.iloc[0]
+        name_hint = ad.get("target_name_hint")
+
+        # 1. If a name hint is set, try to match a specific event in the series
+        target = None
+        if name_hint:
+            hint_lower = name_hint.lower()
+            same_series = ev[ev["series"] == series]
+            matches = same_series[same_series["event_name"].str.lower().str.contains(hint_lower, regex=False)]
+            if not matches.empty:
+                # Prefer the next future event among matches; else most recent past
+                future = matches[matches["event_instance_date"] >= ad["date"]]
+                target = future.iloc[0] if not future.empty else matches.iloc[-1]
+
+        # 2. Default: next future event in series (skipping marketing_skip events)
+        if target is None:
+            future = ev[(ev["series"] == series) &
+                        (ev["event_instance_date"] >= ad["date"]) &
+                        (~ev["instance_key"].astype(str).isin(skip_keys))]
+            if not future.empty:
+                target = future.iloc[0]
+            else:
+                # 3. Fall back to most recent past event in series (still skipping flagged ones)
+                past = ev[(ev["series"] == series) &
+                          (~ev["instance_key"].astype(str).isin(skip_keys))]
+                if past.empty:
+                    continue
+                target = past.iloc[-1]
+
         rows.append({
             "campaign": ad["campaign"],
+            "adset_name": ad.get("adset_name", ""),
             "date": ad["date"],
             "instance_key": target["instance_key"],
             "event_name": target["event_name"],
