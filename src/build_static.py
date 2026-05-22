@@ -158,15 +158,15 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
         paid_spend = float(r.get("paid_spend", 0) or 0)
         owned_v = int(r.get("organic_owned_views", 0) or 0)
         owned_p = int(r.get("organic_owned_posts", 0) or 0)
+        collab_v = int(r.get("organic_collab_views", 0) or 0)
+        collab_p = int(r.get("organic_collab_posts", 0) or 0)
         earned_v = int(r.get("organic_earned_views", 0) or 0)
         earned_p = int(r.get("organic_earned_posts", 0) or 0)
         total = int(r["total_impressions"])
         ipt = r.get("impressions_per_ticket", 0) or 0
-        # Flag events with paid spend but no owned organic
         flag = ""
-        if paid_imp > 0 and owned_v == 0:
-            flag = "<span class='gap-flag' title='Paid ads running but no owned organic posts'>⚠️</span>"
-        earned_pct = f"{earned_v / max(1, owned_v + earned_v) * 100:.0f}%" if (owned_v + earned_v) > 0 else "—"
+        if paid_imp > 0 and (owned_v + collab_v) == 0:
+            flag = "<span class='gap-flag' title='Paid ads running but no owned/collab organic posts'>⚠️</span>"
         body += f"""
         <tr>
           <td class='ev-name'>{r['event_name']}</td>
@@ -174,7 +174,8 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
           <td class='num'>{int(r['tickets_sold']):,}</td>
           <td class='num'>{paid_imp:,}<br><span class='subnum'>${paid_spend:,.0f}</span></td>
           <td class='num'>{owned_v:,}<br><span class='subnum'>{owned_p} post{'s' if owned_p != 1 else ''}</span></td>
-          <td class='num'><span class='earned-cell'>{earned_v:,}</span><br><span class='subnum'>{earned_p} post{'s' if earned_p != 1 else ''} · {earned_pct}</span></td>
+          <td class='num'><span class='collab-cell'>{collab_v:,}</span><br><span class='subnum'>{collab_p} post{'s' if collab_p != 1 else ''}</span></td>
+          <td class='num'><span class='earned-cell'>{earned_v:,}</span><br><span class='subnum'>{earned_p} post{'s' if earned_p != 1 else ''}</span></td>
           <td class='num'><b>{total:,}</b>{flag}</td>
           <td class='num'>{ipt:.0f}</td>
         </tr>"""
@@ -182,8 +183,10 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
     <table>
       <thead><tr>
         <th>Event</th><th>Date</th><th>Tickets</th>
-        <th>Paid FB ads</th><th>Owned organic<br><span class='subhead'>(OTT posts)</span></th>
-        <th>Earned media<br><span class='subhead'>(others tagging OTT)</span></th>
+        <th>Paid FB ads</th>
+        <th>Owned<br><span class='subhead'>(only OTT)</span></th>
+        <th>Collab<br><span class='subhead'>(OTT + partner)</span></th>
+        <th>Earned<br><span class='subhead'>(external only)</span></th>
         <th>Total impressions</th><th>Imp / ticket</th>
       </tr></thead>
       <tbody>{body}</tbody>
@@ -226,9 +229,15 @@ def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: 
         </table>"""
 
     owned = sub[sub["origin"].isin(["owned", "team"])].sort_values("views", ascending=False).head(n)
+    collab = sub[sub["origin"] == "collab"].sort_values("views", ascending=False).head(n)
     earned = sub[sub["origin"] == "earned"].sort_values("views", ascending=False).head(n)
-    return render_table(owned, "Top owned organic posts", "No owned posts mentioning this event.") + \
-           render_table(earned, "Top earned-media mentions", "No external accounts have posted about this event yet — a clear gap to seed.")
+    return (
+        render_table(owned, "Top owned organic posts", "No owned posts mentioning this event.")
+        + render_table(collab, "Top collab posts (OTT + partner co-authored)",
+                       "No collab posts yet — invite a creator partner to co-author.")
+        + render_table(earned, "Top earned-media mentions (pure community)",
+                       "No external accounts have posted about this event yet — a clear gap to seed.")
+    )
 
 
 def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFrame) -> str:
@@ -753,6 +762,7 @@ def render() -> str:
   td.post-caption {{ max-width: 360px; font-size: 12px; color: #475569;
                      overflow: hidden; text-overflow: ellipsis; }}
   .earned-cell {{ color: #16a34a; font-weight: 700; }}
+  .collab-cell {{ color: #ea580c; font-weight: 700; }}
   .subhead {{ display: block; font-weight: 400; font-size: 9px; color: #94a3b8;
               text-transform: none; letter-spacing: 0; }}
   h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;

@@ -76,8 +76,19 @@ def load_tiktok_posts(path: Path = TT_SNAPSHOT) -> pd.DataFrame:
     return df[["channel", "post_id", "date", "caption", "views", "reach", "likes", "comments", "shares", "url", "media_type"]]
 
 
-def _classify_origin(owner: str | None) -> str:
-    """OTT-owned, team personal, or earned media."""
+def _classify_origin(owner: str | None, coauthors: list | None = None) -> str:
+    """Classify a post into one of four buckets:
+
+    - **owned**: posted by an OTT-controlled account with no external co-authors.
+    - **team**: posted by an OTT founder's personal account (Gabriel / Kyle) — counts as owned
+      for the dashboard summary but kept separate so we can tell internal-feed from team-feed.
+    - **collab**: posted by an external account that includes @overthetopxp (or an OTT-team
+      handle) as a co-author. Instagram surfaces these on BOTH accounts' feeds — they're a
+      paid-partnership-style boost that's neither purely owned nor purely earned.
+    - **earned**: external account with no OTT co-author. Pure community amplification.
+    """
+    coauthors = [c.lower() for c in (coauthors or []) if isinstance(c, str)]
+    has_ott_coauthor = bool(set(coauthors) & (OWNED_HANDLES | TEAM_HANDLES))
     if not owner:
         return "earned"
     o = owner.lower()
@@ -85,6 +96,8 @@ def _classify_origin(owner: str | None) -> str:
         return "owned"
     if o in TEAM_HANDLES:
         return "team"
+    if has_ott_coauthor:
+        return "collab"
     return "earned"
 
 
@@ -111,7 +124,12 @@ def load_apify_ig() -> pd.DataFrame:
     df["url"] = df.get("url", "")
     df["media_type"] = df.get("type", "")
     df["owner"] = df.get("ownerUsername", "").fillna("").astype(str)
-    df["origin"] = df["owner"].apply(_classify_origin)
+    # Pull coauthors list (Apify IG returns the field for collab posts)
+    if "coauthorProducers" in df.columns:
+        df["coauthors"] = df["coauthorProducers"].apply(lambda v: v if isinstance(v, list) else [])
+    else:
+        df["coauthors"] = [[] for _ in range(len(df))]
+    df["origin"] = df.apply(lambda r: _classify_origin(r["owner"], r["coauthors"]), axis=1)
     df["source"] = "apify"
     return df[["channel", "post_id", "date", "caption", "views", "reach", "likes",
                "comments", "shares", "url", "media_type", "owner", "origin", "source"]]
@@ -256,12 +274,15 @@ def unified_marketing_summary(tickets: pd.DataFrame, attributed_ads: pd.DataFram
         )
         pieces.append(a)
     if not attributed_posts.empty:
-        # Group all owned (including team) together as "owned", earned separately.
-        # That way the dashboard can show 3 buckets: paid (FB ads) / owned / earned.
+        # Three buckets: owned (incl. team), collab (OTT co-author), earned (external only)
         ap = attributed_posts.copy()
-        ap["bucket"] = ap["origin"].map({"owned": "owned", "team": "owned"}).fillna("earned")
+        ap["bucket"] = ap["origin"].map({
+            "owned": "owned", "team": "owned",
+            "collab": "collab",
+            "earned": "earned",
+        }).fillna("earned")
         for ch in ("instagram_organic", "tiktok_organic"):
-            for bucket in ("owned", "earned"):
+            for bucket in ("owned", "collab", "earned"):
                 sub = ap[(ap["channel"] == ch) & (ap["bucket"] == bucket)]
                 if sub.empty:
                     continue
@@ -282,15 +303,13 @@ def unified_marketing_summary(tickets: pd.DataFrame, attributed_ads: pd.DataFram
     # Total impressions across all channels (paid + organic views)
     impressions_cols = [c for c in out.columns if c.endswith("_impressions") or c.endswith("_views")]
     out["total_impressions"] = out[impressions_cols].sum(axis=1)
-    # Convenience totals: organic owned + organic earned across IG + TikTok
-    owned_cols = [c for c in out.columns if c.endswith("_owned_views")]
-    earned_cols = [c for c in out.columns if c.endswith("_earned_views")]
-    out["organic_owned_views"] = out[owned_cols].sum(axis=1) if owned_cols else 0
-    out["organic_earned_views"] = out[earned_cols].sum(axis=1) if earned_cols else 0
-    owned_post_cols = [c for c in out.columns if c.endswith("_owned_posts")]
-    earned_post_cols = [c for c in out.columns if c.endswith("_earned_posts")]
-    out["organic_owned_posts"] = out[owned_post_cols].sum(axis=1).astype(int) if owned_post_cols else 0
-    out["organic_earned_posts"] = out[earned_post_cols].sum(axis=1).astype(int) if earned_post_cols else 0
+    # Convenience totals per bucket across IG + TikTok
+    for bucket in ("owned", "collab", "earned"):
+        v_cols = [c for c in out.columns if c.endswith(f"_{bucket}_views")]
+        p_cols = [c for c in out.columns if c.endswith(f"_{bucket}_posts")]
+        out[f"organic_{bucket}_views"] = out[v_cols].sum(axis=1) if v_cols else 0
+        out[f"organic_{bucket}_posts"] = (out[p_cols].sum(axis=1).astype(int)
+                                          if p_cols else 0)
 
     # Add event metadata
     if not tickets.empty:
