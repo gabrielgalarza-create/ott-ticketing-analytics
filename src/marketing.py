@@ -153,7 +153,7 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
 
         # 1. If a name hint is set, try to match a specific event in the series
         target = None
-        if name_hint:
+        if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
             hint_lower = name_hint.lower()
             same_series = ev[ev["series"] == series]
             matches = same_series[same_series["event_name"].str.lower().str.contains(hint_lower, regex=False)]
