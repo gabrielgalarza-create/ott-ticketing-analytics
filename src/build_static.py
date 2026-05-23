@@ -193,6 +193,69 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
     </table>"""
 
 
+def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) -> str:
+    """Show ambiguous posts that need manual attribution review."""
+    if attributed_posts.empty or "is_ambiguous" not in attributed_posts.columns:
+        return ""
+    queue = attributed_posts[attributed_posts["is_ambiguous"] == True].copy()
+    if queue.empty:
+        return """<div class="note">
+        ✅ Every attributed post passed the ambiguity check (recap-vs-promo and date-mention rules).
+        Posts you want to reroute manually can be added to <code>config/post_overrides.csv</code>.
+        </div>"""
+
+    # Build event-key → "Event Name (Date)" lookup for showing alternatives
+    ev_meta = tickets.groupby("instance_key", as_index=False).agg(
+        event_name=("event_name", "last"),
+        event_instance_date=("event_instance_date", "last"),
+    )
+    ev_meta["instance_key"] = ev_meta["instance_key"].astype(str)
+    ev_label = {row["instance_key"]: f"{row['event_name']} ({pd.to_datetime(row['event_instance_date']).strftime('%b %-d, %Y')})"
+                for _, row in ev_meta.iterrows()}
+
+    rows_html = ""
+    for _, p in queue.sort_values("views", ascending=False).iterrows():
+        ch_label = "IG" if p["channel"] == "instagram_organic" else "TikTok"
+        d = pd.to_datetime(p["date"]).strftime("%b %-d, %Y")
+        cap = (p["caption"][:200] + "…") if len(p["caption"]) > 200 else p["caption"]
+        cap = cap.replace("\n", " ")
+        url_link = f"<a href='{p['url']}' target='_blank' rel='noopener'>view ↗</a>" if p["url"] else ""
+        current = ev_label.get(str(p["instance_key"]), p["event_name"])
+        alts = [k.strip() for k in (p.get("alt_instance_keys") or "").split(",") if k.strip()]
+        alt_labels = [ev_label.get(k, k) for k in alts]
+        alt_block = ""
+        if alt_labels:
+            alt_block = "<br>".join(
+                f"<code class='ik'>{k}</code> — <b>{ev_label.get(k, k)}</b>"
+                for k in alts
+            )
+        rows_html += f"""
+        <tr>
+          <td><span class='ch-badge'>{ch_label}</span></td>
+          <td>{d}<br><span class='subnum'>@{p.get('owner', '')}</span></td>
+          <td class='num'><b>{int(p['views']):,}</b></td>
+          <td class='post-caption'><b>Why flagged:</b> {p['ambiguity_reason']}<br><br>{cap}</td>
+          <td><b>Currently:</b> {current}<br><br><b>Suggested alternative(s):</b><br>{alt_block or '<span class=subnum>(none)</span>'}</td>
+          <td><code class='ik'>{p['post_id']}</code><br>{url_link}</td>
+        </tr>"""
+
+    return f"""
+    <div class="note">
+      <b>{len(queue)} post{'s' if len(queue) != 1 else ''} flagged for review.</b> The auto-router
+      chose an event for each, but the caption text suggests it could belong to a different one
+      (e.g. recap language pointing back to a past event, or an explicit date that doesn't match).
+      To override, copy the <code>post_id</code> into <code>config/post_overrides.csv</code> with
+      the correct <code>instance_key</code> — the next build will use your override.
+    </div>
+    <table>
+      <thead><tr>
+        <th>Ch</th><th>Posted</th><th>Views</th><th>Caption / why flagged</th>
+        <th>Routed event &amp; suggested alternatives</th><th>Post ID</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>"""
+
+
 def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: int = 5) -> str:
     """Top performing organic posts for an event — split into Owned and Earned."""
     if attributed_posts.empty:
@@ -691,6 +754,7 @@ def render() -> str:
     marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
     marketing_pace_html = build_marketing_pace_chart(tickets, attributed_ads)
     campaign_breakdown_html = build_campaign_breakdown(attributed_ads)
+    review_queue_html = build_review_queue(attributed_posts, tickets)
     unified_channel_html = build_unified_channel_table(unified_summary)
 
     paid_n, free_n = rates.get("paid_n", 0), rates.get("free_n", 0)
@@ -763,6 +827,11 @@ def render() -> str:
                      overflow: hidden; text-overflow: ellipsis; }}
   .earned-cell {{ color: #16a34a; font-weight: 700; }}
   .collab-cell {{ color: #ea580c; font-weight: 700; }}
+  code.ik {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
+              background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #475569; }}
+  .ch-badge {{ display: inline-block; background: #6366f1; color: #fff; padding: 2px 8px;
+                border-radius: 4px; font-size: 11px; font-weight: 700; }}
+  .post-caption {{ max-width: 360px; font-size: 12px; color: #475569; }}
   .subhead {{ display: block; font-weight: 400; font-size: 9px; color: #94a3b8;
               text-transform: none; letter-spacing: 0; }}
   h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;
@@ -834,6 +903,9 @@ def render() -> str:
   <h3>Campaign breakdown — by event</h3>
   <p class="caption">Click any event to expand its campaign list and see which ads delivered the impressions.</p>
   {campaign_breakdown_html}
+
+  <h2>Review queue — posts needing attribution confirmation</h2>
+  {review_queue_html}
 
   <h2>Sales velocity</h2>
   <div class="chart-box">{velocity_html}</div>

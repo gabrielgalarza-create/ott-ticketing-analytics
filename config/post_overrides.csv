@@ -1,0 +1,12 @@
+post_id,instance_key,note
+# Manual post → event attribution overrides.
+# Lines starting with # are comments.
+#
+# post_id      = Instagram media_id or TikTok video_id (visible in the dashboard's Review queue)
+# instance_key = the event_base_id (UUID from SweatPals) you want this post attributed to
+#                OR "ignore" to drop the post from attribution
+# note         = free-text note for yourself about why this override exists
+#
+# Examples:
+# 3897925603475059105,8f1d06bf-4e06-4077-947c-cd7275841755,Fit Fest World Cup teaser
+# 7561234567890123456,ignore,Generic OTT brand post, not event-specific
