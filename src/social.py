@@ -10,6 +10,8 @@ from Windsor MCP (connectors `instagram` + `tiktok_organic`).
 from __future__ import annotations
 
 import json
+import re
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -19,14 +21,77 @@ from src.marketing import ADSET_RULES, _classify_adset, _event_series
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 IG_SNAPSHOT = DATA_DIR / "social_instagram.json"
 TT_SNAPSHOT = DATA_DIR / "social_tiktok.json"
-# Apify-scraped data: includes external mentions tagging @overthetopxp + recent
-# OTT posts pulled directly from IG/TikTok with engagement metrics not in Windsor.
 APIFY_IG_SNAPSHOT = DATA_DIR / "apify_ig_mentions.json"
 APIFY_TT_SNAPSHOT = DATA_DIR / "apify_tt_mentions.json"
 
-# Owners considered "OTT-owned" (vs earned). Everything else is earned media.
+POST_OVERRIDES_CSV = Path(__file__).resolve().parent.parent / "config" / "post_overrides.csv"
+
 OWNED_HANDLES = {"overthetopxp"}
-TEAM_HANDLES = {"thedandale", "kyleculus"}  # OTT founders' personal accounts
+TEAM_HANDLES = {"thedandale", "kyleculus"}
+
+# Past-tense / recap markers — strong signal a post is reviewing a past event, not promoting next.
+RECAP_PHRASES = [
+    r"thank\s*you\s*(to|for)",
+    r"thanks?\s*(to|for)\s*(everyone|y'?all|you all|the team|coming)",
+    r"this\s+(past|last)\s+(weekend|saturday|sunday|night|friday|month)",
+    r"\bicymi\b",
+    r"yall\s+(came|showed|brought|killed|did)",
+    r"y'all\s+(came|showed|brought|killed|did)",
+    r"we\s+just\s+(wrapped|did|had|finished|hosted)",
+    r"(last|past)\s+night",
+    r"\brecap\b",
+    r"was\s+(amazing|incredible|epic|so much fun|a vibe|unreal|insane|wild)",
+    r"what\s+a\s+(weekend|day|night|vibe|time)",
+    r"shoutout to.*came",
+    r"thanks\s+for\s+(coming|pulling|showing)",
+    r"📸 by",  # photo credits = post-event recap pattern
+    r"📷 by",
+]
+RECAP_RE = re.compile("|".join(RECAP_PHRASES), re.IGNORECASE)
+
+# Forward-looking promo markers
+PROMO_PHRASES = [
+    r"\bsee\s+(you|ya|yall|y'?all)\b",
+    r"\bjoin\s+us\b",
+    r"\bpull\s*up\b",
+    r"\btickets?\s+(live|available|moving|on sale|in bio|going fast)",
+    r"\blink\s+in\s+bio\b",
+    r"\bsave\s+the\s+date\b",
+    r"\bdon'?t\s+miss\b",
+    r"\bnext\s+(weekend|saturday|sunday|month|one)\b",
+    r"\bthis\s+(weekend|saturday|sunday)\b",
+    r"\bcoming\s+(up|soon)\b",
+    r"\bRSVP\b",
+    r"\bcomes back\b|\bis back\b|\breturns\b",
+    r"\bearly\s*bird\b",
+    r"\bget\s+(your|ya|yours)\s+ticket",
+]
+PROMO_RE = re.compile("|".join(PROMO_PHRASES), re.IGNORECASE)
+
+
+def _extract_date_mentions(caption: str) -> list[tuple[int, int]]:
+    """Find date references in a caption (month/day pairs). Returns list of (month, day)."""
+    if not isinstance(caption, str):
+        return []
+    text = caption
+    months = {"jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+              "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+              "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+              "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12}
+    found: list[tuple[int, int]] = []
+    # Pattern A: "Jan 31", "January 31st", "Feb 21"
+    for m in re.finditer(r"\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b",
+                         text, re.IGNORECASE):
+        month = months.get(m.group(1).lower())
+        day = int(m.group(2))
+        if month and 1 <= day <= 31:
+            found.append((month, day))
+    # Pattern B: "1/31", "5/9", "2/21", "6/27"
+    for m in re.finditer(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?![\d/])", text):
+        a, b = int(m.group(1)), int(m.group(2))
+        if 1 <= a <= 12 and 1 <= b <= 31:
+            found.append((a, b))
+    return found
 
 
 def _load_rows(path: Path) -> list[dict]:
@@ -190,9 +255,85 @@ def load_all_posts() -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def load_post_overrides(path: Path = POST_OVERRIDES_CSV) -> dict[str, dict]:
+    """Manual post→event overrides. CSV columns: post_id, instance_key, note.
+
+    Set instance_key to "ignore" to drop a post from attribution entirely.
+    """
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path, dtype=str, comment="#").fillna("")
+    except pd.errors.EmptyDataError:
+        return {}
+    out = {}
+    for _, r in df.iterrows():
+        pid = (r.get("post_id") or "").strip()
+        if not pid or pid.startswith("#"):
+            continue
+        out[pid] = {
+            "instance_key": (r.get("instance_key") or "").strip(),
+            "note": (r.get("note") or "").strip(),
+        }
+    return out
+
+
+def _detect_ambiguity(p: pd.Series, target: pd.Series, ev: pd.DataFrame) -> tuple[bool, str, list[str]]:
+    """Return (is_ambiguous, reason, alternative_instance_keys).
+
+    A post is flagged ambiguous when EITHER:
+      - It's clearly a recap of a past event but was routed forward to a future one
+      - Its caption mentions a specific date that doesn't match the routed event's date
+        (and DOES match another event in the same series)
+    """
+    caption = p.get("caption") or ""
+    if not isinstance(caption, str):
+        return (False, "", [])
+
+    target_date = pd.to_datetime(target["event_instance_date"])
+    post_date = pd.to_datetime(p["date"])
+    series = target.get("series")
+
+    # 1. Date-mention check: does the caption reference a specific date that doesn't match
+    #    the routed event's date, but DOES match another event in the same series?
+    same_series_events = ev[ev["series"] == series]
+    mentions = _extract_date_mentions(caption)
+    matched_event_keys: list[str] = []
+    for (m, d) in mentions:
+        if m == target_date.month and d == target_date.day:
+            return (False, "", [])  # Caption explicitly confirms the routed event — not ambiguous
+        for _, e in same_series_events.iterrows():
+            edt = pd.to_datetime(e["event_instance_date"])
+            if edt.month == m and edt.day == d and str(e["instance_key"]) != str(target["instance_key"]):
+                matched_event_keys.append(str(e["instance_key"]))
+    if matched_event_keys:
+        return (True, f"Caption mentions a date that matches a different event in the {series} series",
+                list(dict.fromkeys(matched_event_keys)))
+
+    # 2. Recap-vs-promo check: post has strong recap language and was routed FORWARD
+    is_recap = bool(RECAP_RE.search(caption))
+    is_promo = bool(PROMO_RE.search(caption))
+    days_diff = (target_date - post_date).days
+    if is_recap and not is_promo and days_diff > 0:
+        # Find the most recent past event in series — likely the actual subject
+        past = same_series_events[same_series_events["event_instance_date"] < post_date]
+        if not past.empty:
+            recent = past.sort_values("event_instance_date").iloc[-1]
+            if str(recent["instance_key"]) != str(target["instance_key"]):
+                return (True, "Caption reads as a recap, but was routed to a future event",
+                        [str(recent["instance_key"])])
+
+    return (False, "", [])
+
+
 def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
                                capacities: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Map each post to a specific event using the same routing as ad-set attribution."""
+    """Map each post to a specific event using the same routing as ad-set attribution.
+
+    Also annotates posts with `is_ambiguous`, `ambiguity_reason`, and `alt_instance_keys`
+    so the dashboard can surface a review queue. Overrides from `config/post_overrides.csv`
+    take precedence over auto-routing.
+    """
     if posts.empty or tickets.empty:
         return pd.DataFrame()
 
@@ -200,6 +341,8 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
     if capacities is not None and not capacities.empty and "marketing_skip" in capacities.columns:
         skip_series = capacities["marketing_skip"].astype(str).str.strip().str.lower()
         skip_keys = set(capacities.loc[skip_series.isin(("true", "1", "yes", "y")), "instance_key"].astype(str))
+
+    overrides = load_post_overrides()
 
     ev = tickets.groupby("instance_key", as_index=False).agg(
         event_name=("event_name", "last"),
@@ -213,32 +356,44 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
 
     rows = []
     for _, p in posts.iterrows():
-        series = p.get("target_series")
-        if not isinstance(series, str) or not series:
-            continue
-        name_hint = p.get("target_name_hint")
-
-        target = None
-        if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
-            hint_lower = name_hint.lower()
-            same_series = ev[ev["series"] == series]
-            matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
-            if not matches.empty:
-                future = matches[matches["event_instance_date"] >= p["date"]]
-                target = future.iloc[0] if not future.empty else matches.iloc[-1]
-
-        if target is None:
-            future = ev[(ev["series"] == series) &
-                        (ev["event_instance_date"] >= p["date"]) &
-                        (~ev["instance_key"].astype(str).isin(skip_keys))]
-            if not future.empty:
-                target = future.iloc[0]
-            else:
-                past = ev[(ev["series"] == series) &
-                          (~ev["instance_key"].astype(str).isin(skip_keys))]
-                if past.empty:
-                    continue
-                target = past.iloc[-1]
+        # Manual override check first
+        override = overrides.get(str(p.get("post_id", "")))
+        if override:
+            ik = override["instance_key"]
+            if ik.lower() in ("ignore", "skip", "drop", ""):
+                continue
+            match = ev[ev["instance_key"].astype(str) == ik]
+            if match.empty:
+                continue  # bad override — drop
+            target = match.iloc[0]
+            series = target.get("series", p.get("target_series", ""))
+            is_amb, reason, alts = (False, f"overridden: {override.get('note','')}", [])
+        else:
+            series = p.get("target_series")
+            if not isinstance(series, str) or not series:
+                continue
+            name_hint = p.get("target_name_hint")
+            target = None
+            if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
+                hint_lower = name_hint.lower()
+                same_series = ev[ev["series"] == series]
+                matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
+                if not matches.empty:
+                    future = matches[matches["event_instance_date"] >= p["date"]]
+                    target = future.iloc[0] if not future.empty else matches.iloc[-1]
+            if target is None:
+                future = ev[(ev["series"] == series) &
+                            (ev["event_instance_date"] >= p["date"]) &
+                            (~ev["instance_key"].astype(str).isin(skip_keys))]
+                if not future.empty:
+                    target = future.iloc[0]
+                else:
+                    past = ev[(ev["series"] == series) &
+                              (~ev["instance_key"].astype(str).isin(skip_keys))]
+                    if past.empty:
+                        continue
+                    target = past.iloc[-1]
+            is_amb, reason, alts = _detect_ambiguity(p, target, ev)
 
         rows.append({
             "channel": p["channel"],
@@ -259,6 +414,10 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
             "event_name": target["event_name"],
             "event_instance_date": target["event_instance_date"],
             "series": series,
+            "is_ambiguous": bool(is_amb),
+            "ambiguity_reason": reason,
+            "alt_instance_keys": ",".join(alts),
+            "is_overridden": bool(override),
         })
     return pd.DataFrame(rows)
 
