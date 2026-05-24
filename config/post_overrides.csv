@@ -17,3 +17,9 @@ post_id,instance_key,note
 7558251316099747103,a281c1e2-03bc-4a49-973d-adad12c4638a,reassigned via dashboard: The Blend Day Party (Nov 1 2025)
 17857366116632251,cadee9c5-2e9d-49e7-89ac-1a5cb0ec8c1e,reassigned via dashboard: The Blend @ W San Francisco (Apr 18 2026)
 7638450880634834206,f25a385a-b9c1-4293-b410-d75eac1ae651,reassigned via dashboard: The Blend Day Party (May 9 2026)
+#
+# --- Review queue cleared 2026-05-24 ---
+18050710883315755,keep,Vol.3 promo -> Rivian correct (false date flag on "3 DAYS")
+18045489470523721,keep,Sacramento recap -> Mar 21 Sac correct
+18330773614217818,keep,On-tour promo -> Mar 21 Sac (this weekend) correct
+18103028293748920,cadee9c5-2e9d-49e7-89ac-1a5cb0ec8c1e,Apr 25 recap of W SF Blend (was wrongly on After Party)

@@ -333,6 +333,20 @@ def _detect_ambiguity(p: pd.Series, target: pd.Series, ev: pd.DataFrame) -> tupl
     return (False, "", [])
 
 
+def _post_row(p, target, series, is_amb, reason, alts, is_overridden) -> dict:
+    return {
+        "channel": p["channel"], "post_id": p["post_id"], "date": p["date"],
+        "caption": p["caption"][:240], "views": int(p["views"]), "reach": int(p["reach"]),
+        "likes": int(p["likes"]), "comments": int(p["comments"]), "shares": int(p["shares"]),
+        "url": p["url"], "media_type": p["media_type"], "owner": p.get("owner", ""),
+        "origin": p.get("origin", "earned"), "source": p.get("source", "windsor"),
+        "instance_key": target["instance_key"], "event_name": target["event_name"],
+        "event_instance_date": target["event_instance_date"], "series": series,
+        "is_ambiguous": bool(is_amb), "ambiguity_reason": reason,
+        "alt_instance_keys": ",".join(alts), "is_overridden": bool(is_overridden),
+    }
+
+
 def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
                                capacities: pd.DataFrame | None = None,
                                waitlist: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -366,17 +380,24 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
     for _, p in posts.iterrows():
         # Manual override check first
         override = overrides.get(str(p.get("post_id", "")))
+        force_keep = False
         if override:
             ik = override["instance_key"]
-            if ik.lower() in ("ignore", "skip", "drop", ""):
+            ik_l = ik.lower()
+            if ik_l in ("ignore", "skip", "drop", ""):
                 continue
-            match = ev[ev["instance_key"].astype(str) == ik]
-            if match.empty:
-                continue  # bad override — drop
-            target = match.iloc[0]
-            series = target.get("series", p.get("target_series", ""))
-            is_amb, reason, alts = (False, f"overridden: {override.get('note','')}", [])
-        else:
+            if ik_l in ("keep", "confirm", "keep-as-is", "same", "ok"):
+                # Confirmed correct as auto-routed — fall through to normal routing but clear the flag
+                force_keep = True
+            else:
+                match = ev[ev["instance_key"].astype(str) == ik]
+                if match.empty:
+                    continue  # bad override — drop
+                target = match.iloc[0]
+                series = target.get("series", p.get("target_series", ""))
+                rows.append(_post_row(p, target, series, False, f"overridden: {override.get('note','')}", [], True))
+                continue
+        if True:
             series = p.get("target_series")
             if not isinstance(series, str) or not series:
                 continue
@@ -408,31 +429,9 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
                         continue
                     target = recap.iloc[-1]
             is_amb, reason, alts = _detect_ambiguity(p, target, ev)
-
-        rows.append({
-            "channel": p["channel"],
-            "post_id": p["post_id"],
-            "date": p["date"],
-            "caption": p["caption"][:240],
-            "views": int(p["views"]),
-            "reach": int(p["reach"]),
-            "likes": int(p["likes"]),
-            "comments": int(p["comments"]),
-            "shares": int(p["shares"]),
-            "url": p["url"],
-            "media_type": p["media_type"],
-            "owner": p.get("owner", ""),
-            "origin": p.get("origin", "earned"),
-            "source": p.get("source", "windsor"),
-            "instance_key": target["instance_key"],
-            "event_name": target["event_name"],
-            "event_instance_date": target["event_instance_date"],
-            "series": series,
-            "is_ambiguous": bool(is_amb),
-            "ambiguity_reason": reason,
-            "alt_instance_keys": ",".join(alts),
-            "is_overridden": bool(override),
-        })
+            if force_keep:
+                is_amb, reason, alts = False, "confirmed correct (kept as-is)", []
+        rows.append(_post_row(p, target, series, is_amb, reason, alts, bool(override)))
     return pd.DataFrame(rows)
 
 
