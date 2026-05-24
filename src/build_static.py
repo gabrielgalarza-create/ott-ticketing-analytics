@@ -256,10 +256,11 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
       chose an event for each, but the caption suggests it could belong to a different one
       (recap language pointing back to a past event, or an explicit date that doesn't match).
       <br><br>
-      <b>Pick the correct event from each dropdown</b>, then click
-      <b>Generate overrides file</b>. That produces the exact <code>config/post_overrides.csv</code>
-      contents — commit it (or send it to me) and the next build applies your choices.
-      Selections you leave on "✓ Keep" are unchanged.
+      <b>1.</b> Pick the correct event from each dropdown (leave on "✓ Keep" if it's already right).
+      &nbsp; <b>2.</b> Click <b>Copy selections</b>.
+      &nbsp; <b>3.</b> Paste them to Claude in chat — I'll apply them and redeploy.
+      <br><span class="subnum">(GitHub Pages is a static site, so there's no live "save" button — pasting the
+      copied text to Claude, or committing it to <code>config/post_overrides.csv</code>, is how it gets applied.)</span>
     </div>
     <table>
       <thead><tr>
@@ -269,12 +270,11 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
       <tbody>{rows_html}</tbody>
     </table>
     <div style="margin:16px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <button id="ott-gen-btn" class="ott-btn" onclick="ottGenerateOverrides()">Generate overrides file</button>
-      <button class="ott-btn ott-btn-ghost" onclick="ottCopyOverrides()">Copy to clipboard</button>
-      <button class="ott-btn ott-btn-ghost" onclick="ottDownloadOverrides()">Download post_overrides.csv</button>
+      <button id="ott-gen-btn" class="ott-btn" onclick="ottCopyOverrides()">📋 Copy selections (paste to Claude)</button>
+      <button class="ott-btn ott-btn-ghost" onclick="ottDownloadOverrides()">Download CSV instead</button>
       <span id="ott-gen-status" class="subnum"></span>
     </div>
-    <textarea id="ott-overrides-out" class="ott-output" placeholder="Your post_overrides.csv contents will appear here after you make selections and click Generate…" readonly></textarea>
+    <textarea id="ott-overrides-out" class="ott-output" placeholder="Make your selections above, then click Copy. The lines to paste to Claude will appear here…" readonly></textarea>
     <script>
       function ottMarkChanged(sel) {{
         const changed = sel.value !== sel.closest('tr').dataset.current;
@@ -303,7 +303,7 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
           return;
         }}
         out.value = lines.join('\\n') + '\\n';
-        status.textContent = (lines.length - 1) + ' override(s) ready. Copy or download, then commit to config/post_overrides.csv.';
+        status.textContent = (lines.length - 1) + ' selection(s) ready — paste to Claude or commit to config/post_overrides.csv.';
       }}
       function ottCopyOverrides() {{
         ottGenerateOverrides();
@@ -728,18 +728,6 @@ def render() -> str:
         pct_to_target = sold / target * 100
         forecast_ok = pd.notna(r["forecast_final"]) and r["forecast_final"] >= target
 
-        scenarios = []
-        for label, key in [
-            ("Email blast to community (open list)", "email_to_list"),
-            ("Organic IG/TikTok (warm followers)", "organic_social"),
-            ("Paid social retargeting", "warm_paid_social"),
-            ("Blended typical mix", "blended_typical"),
-            ("Cold paid social ads", "cold_paid_social"),
-        ]:
-            rate = IMPRESSION_CONVERSION[key]
-            r_calc = impressions_to_target(sold, target, rate)
-            scenarios.append((label, rate, r_calc["impressions_needed"]))
-
         per_day = (gap / days) if days > 0 else gap
         forecast_text = (
             f"Forecast pace lands at ~{int(r['forecast_final'])} ({int(r['forecast_low'])}–{int(r['forecast_high'])})"
@@ -747,10 +735,6 @@ def render() -> str:
         )
         verdict = ("✅ on track to hit target" if forecast_ok
                    else "⚠️ off target — extra marketing push needed")
-        scen_rows = "".join(
-            f"<tr><td>{label}</td><td class='num'>{rate*100:.2f}%</td><td class='num'><b>{imp:,}</b></td></tr>"
-            for label, rate, imp in scenarios
-        )
         # Build the comparables table that powers this forecast
         fc_detail = forecast_final_tickets(tickets, r)
         comp_html = ""
@@ -782,12 +766,6 @@ def render() -> str:
           </div>
           <p>{verdict} · {forecast_text}</p>
           <p><b>{gap:,} more tickets needed in {days} days</b> = {per_day:.0f}/day average</p>
-          <h4>Impressions needed by channel</h4>
-          <table class="scenarios">
-            <thead><tr><th>Channel</th><th>Impression → ticket %</th><th>Impressions needed</th></tr></thead>
-            <tbody>{scen_rows}</tbody>
-          </table>
-          <p class="caption">Conversion rates use 2026 industry benchmarks. Mix channels to hit the goal: e.g. one email + organic posts + paid retargeting is usually most cost-efficient.</p>
           {build_marketing_block(r, marketing_table, attributed_ads, target, days)}
           {build_top_posts_block(attributed_posts, r['instance_key'], n=5)}
           {comp_html}
