@@ -184,9 +184,9 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
       <thead><tr>
         <th>Event</th><th>Date</th><th>Tickets</th>
         <th>Paid FB ads</th>
-        <th>Owned<br><span class='subhead'>(only OTT)</span></th>
-        <th>Collab<br><span class='subhead'>(OTT + partner)</span></th>
-        <th>Earned<br><span class='subhead'>(external only)</span></th>
+        <th>Owned<br><span class='subhead'>(OTT-created)</span></th>
+        <th>Earned · amplified<br><span class='subhead'>(community post, OTT collab-boosted)</span></th>
+        <th>Earned · organic<br><span class='subhead'>(community, not boosted)</span></th>
         <th>Total impressions</th><th>Imp / ticket</th>
       </tr></thead>
       <tbody>{body}</tbody>
@@ -204,14 +204,19 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
         Posts you want to reroute manually can be added to <code>config/post_overrides.csv</code>.
         </div>"""
 
-    # Build event-key → "Event Name (Date)" lookup for showing alternatives
+    # Build event-key → "Event Name (Date)" lookup. All blend/fit-fest/etc events become
+    # selectable options so you're never limited to just the suggested alternatives.
+    import json as _json
     ev_meta = tickets.groupby("instance_key", as_index=False).agg(
         event_name=("event_name", "last"),
         event_instance_date=("event_instance_date", "last"),
-    )
+    ).sort_values("event_instance_date")
     ev_meta["instance_key"] = ev_meta["instance_key"].astype(str)
     ev_label = {row["instance_key"]: f"{row['event_name']} ({pd.to_datetime(row['event_instance_date']).strftime('%b %-d, %Y')})"
                 for _, row in ev_meta.iterrows()}
+    # Options list for the dropdowns (most recent first)
+    options_js = [{"key": k, "label": v} for k, v in
+                  sorted(ev_label.items(), key=lambda kv: kv[1])]
 
     rows_html = ""
     for _, p in queue.sort_values("views", ascending=False).iterrows():
@@ -220,40 +225,105 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
         cap = (p["caption"][:200] + "…") if len(p["caption"]) > 200 else p["caption"]
         cap = cap.replace("\n", " ")
         url_link = f"<a href='{p['url']}' target='_blank' rel='noopener'>view ↗</a>" if p["url"] else ""
-        current = ev_label.get(str(p["instance_key"]), p["event_name"])
+        current_key = str(p["instance_key"])
+        current = ev_label.get(current_key, p["event_name"])
         alts = [k.strip() for k in (p.get("alt_instance_keys") or "").split(",") if k.strip()]
-        alt_labels = [ev_label.get(k, k) for k in alts]
-        alt_block = ""
-        if alt_labels:
-            alt_block = "<br>".join(
-                f"<code class='ik'>{k}</code> — <b>{ev_label.get(k, k)}</b>"
-                for k in alts
-            )
+
+        # Build the <select>: current first (pre-selected), then suggested alts, then divider, then all events, then Ignore
+        opt_html = f"<option value='{current_key}' selected>✓ Keep: {ev_label.get(current_key, current)}</option>"
+        for k in alts:
+            if k in ev_label:
+                opt_html += f"<option value='{k}'>⭐ Suggested: {ev_label[k]}</option>"
+        opt_html += "<option disabled>──────────</option>"
+        for o in options_js:
+            if o["key"] != current_key and o["key"] not in alts:
+                opt_html += f"<option value='{o['key']}'>{o['label']}</option>"
+        opt_html += "<option disabled>──────────</option>"
+        opt_html += "<option value='ignore'>🚫 Ignore — not event-specific</option>"
+
         rows_html += f"""
-        <tr>
+        <tr data-postid="{p['post_id']}" data-current="{current_key}">
           <td><span class='ch-badge'>{ch_label}</span></td>
           <td>{d}<br><span class='subnum'>@{p.get('owner', '')}</span></td>
           <td class='num'><b>{int(p['views']):,}</b></td>
-          <td class='post-caption'><b>Why flagged:</b> {p['ambiguity_reason']}<br><br>{cap}</td>
-          <td><b>Currently:</b> {current}<br><br><b>Suggested alternative(s):</b><br>{alt_block or '<span class=subnum>(none)</span>'}</td>
-          <td><code class='ik'>{p['post_id']}</code><br>{url_link}</td>
+          <td class='post-caption'><b>Why flagged:</b> {p['ambiguity_reason']}<br><br>{cap} {url_link}</td>
+          <td><select class='attr-select' data-postid="{p['post_id']}" onchange='ottMarkChanged(this)'>{opt_html}</select></td>
         </tr>"""
 
     return f"""
     <div class="note">
       <b>{len(queue)} post{'s' if len(queue) != 1 else ''} flagged for review.</b> The auto-router
-      chose an event for each, but the caption text suggests it could belong to a different one
-      (e.g. recap language pointing back to a past event, or an explicit date that doesn't match).
-      To override, copy the <code>post_id</code> into <code>config/post_overrides.csv</code> with
-      the correct <code>instance_key</code> — the next build will use your override.
+      chose an event for each, but the caption suggests it could belong to a different one
+      (recap language pointing back to a past event, or an explicit date that doesn't match).
+      <br><br>
+      <b>Pick the correct event from each dropdown</b>, then click
+      <b>Generate overrides file</b>. That produces the exact <code>config/post_overrides.csv</code>
+      contents — commit it (or send it to me) and the next build applies your choices.
+      Selections you leave on "✓ Keep" are unchanged.
     </div>
     <table>
       <thead><tr>
         <th>Ch</th><th>Posted</th><th>Views</th><th>Caption / why flagged</th>
-        <th>Routed event &amp; suggested alternatives</th><th>Post ID</th>
+        <th style="min-width:260px">Attribute to →</th>
       </tr></thead>
       <tbody>{rows_html}</tbody>
-    </table>"""
+    </table>
+    <div style="margin:16px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button id="ott-gen-btn" class="ott-btn" onclick="ottGenerateOverrides()">Generate overrides file</button>
+      <button class="ott-btn ott-btn-ghost" onclick="ottCopyOverrides()">Copy to clipboard</button>
+      <button class="ott-btn ott-btn-ghost" onclick="ottDownloadOverrides()">Download post_overrides.csv</button>
+      <span id="ott-gen-status" class="subnum"></span>
+    </div>
+    <textarea id="ott-overrides-out" class="ott-output" placeholder="Your post_overrides.csv contents will appear here after you make selections and click Generate…" readonly></textarea>
+    <script>
+      function ottMarkChanged(sel) {{
+        const changed = sel.value !== sel.closest('tr').dataset.current;
+        sel.style.borderColor = changed ? '#ea580c' : '#e2e8f0';
+        sel.style.background = changed ? '#fff7ed' : '#fff';
+      }}
+      function ottBuildCsv() {{
+        const lines = ['post_id,instance_key,note'];
+        document.querySelectorAll('.attr-select').forEach(sel => {{
+          const tr = sel.closest('tr');
+          const cur = tr.dataset.current;
+          if (sel.value !== cur) {{
+            const label = sel.options[sel.selectedIndex].text.replace(/^[^A-Za-z0-9]+/, '').replace(/,/g, ';');
+            lines.push(`${{sel.dataset.postid}},${{sel.value}},reassigned via dashboard: ${{label}}`);
+          }}
+        }});
+        return lines;
+      }}
+      function ottGenerateOverrides() {{
+        const lines = ottBuildCsv();
+        const out = document.getElementById('ott-overrides-out');
+        const status = document.getElementById('ott-gen-status');
+        if (lines.length === 1) {{
+          out.value = '';
+          status.textContent = 'No changes selected yet — every post is still on "Keep".';
+          return;
+        }}
+        out.value = lines.join('\\n') + '\\n';
+        status.textContent = (lines.length - 1) + ' override(s) ready. Copy or download, then commit to config/post_overrides.csv.';
+      }}
+      function ottCopyOverrides() {{
+        ottGenerateOverrides();
+        const out = document.getElementById('ott-overrides-out');
+        if (!out.value) return;
+        navigator.clipboard.writeText(out.value).then(() => {{
+          document.getElementById('ott-gen-status').textContent = 'Copied to clipboard ✓';
+        }});
+      }}
+      function ottDownloadOverrides() {{
+        ottGenerateOverrides();
+        const out = document.getElementById('ott-overrides-out');
+        if (!out.value) return;
+        const blob = new Blob([out.value], {{type: 'text/csv'}});
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'post_overrides.csv';
+        a.click();
+      }}
+    </script>"""
 
 
 def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: int = 5) -> str:
@@ -296,9 +366,9 @@ def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: 
     earned = sub[sub["origin"] == "earned"].sort_values("views", ascending=False).head(n)
     return (
         render_table(owned, "Top owned organic posts", "No owned posts mentioning this event.")
-        + render_table(collab, "Top collab posts (OTT + partner co-authored)",
-                       "No collab posts yet — invite a creator partner to co-author.")
-        + render_table(earned, "Top earned-media mentions (pure community)",
+        + render_table(collab, "Top earned · amplified (community posts OTT collab-boosted)",
+                       "No amplified community posts yet — ask creators who posted to collab so it hits your feed too.")
+        + render_table(earned, "Top earned · organic (community, not boosted)",
                        "No external accounts have posted about this event yet — a clear gap to seed.")
     )
 
@@ -832,6 +902,16 @@ def render() -> str:
   .ch-badge {{ display: inline-block; background: #6366f1; color: #fff; padding: 2px 8px;
                 border-radius: 4px; font-size: 11px; font-weight: 700; }}
   .post-caption {{ max-width: 360px; font-size: 12px; color: #475569; }}
+  select.attr-select {{ width: 100%; padding: 7px 8px; border: 1px solid #e2e8f0;
+                         border-radius: 6px; font-size: 12px; background: #fff; }}
+  .ott-btn {{ background: #6366f1; color: #fff; border: none; border-radius: 8px;
+               padding: 10px 16px; font-size: 13px; font-weight: 700; cursor: pointer; }}
+  .ott-btn:hover {{ background: #4f46e5; }}
+  .ott-btn-ghost {{ background: #fff; color: #6366f1; border: 1px solid #c7d2fe; }}
+  .ott-btn-ghost:hover {{ background: #eef2ff; }}
+  .ott-output {{ width: 100%; min-height: 90px; font-family: ui-monospace, Menlo, monospace;
+                  font-size: 12px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px;
+                  box-sizing: border-box; background: #f8fafc; }}
   .subhead {{ display: block; font-weight: 400; font-size: 9px; color: #94a3b8;
               text-transform: none; letter-spacing: 0; }}
   h3 {{ font-size: 14px; margin: 26px 0 12px; color: #475569;
