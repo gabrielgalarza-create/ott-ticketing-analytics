@@ -554,68 +554,99 @@ def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFra
     return _chart(fig)
 
 
-def build_campaign_breakdown(attributed_ads: pd.DataFrame) -> str:
-    """For each event with ad data, list its contributing campaigns."""
-    if attributed_ads.empty:
+def build_campaign_breakdown(attributed_ads: pd.DataFrame,
+                             attributed_posts: pd.DataFrame | None = None) -> str:
+    """For each event, list its paid ad campaigns/ad sets AND its attributed organic IG/TikTok posts."""
+    if attributed_ads.empty and (attributed_posts is None or attributed_posts.empty):
         return "<p class='empty'>No campaign data.</p>"
 
-    # Group by (event, campaign, ad set) so the breakdown is at the level decisions get made
-    has_adset = "adset_name" in attributed_ads.columns
-    group_cols = ["instance_key", "event_name", "event_instance_date", "campaign"]
-    if has_adset:
-        group_cols.append("adset_name")
-    by_camp = attributed_ads.groupby(group_cols, as_index=False).agg(
-        impressions=("impressions", "sum"),
-        spend=("spend", "sum"),
-        clicks=("clicks", "sum"),
-        first_day=("date", "min"),
-        last_day=("date", "max"),
-        ad_days=("date", "nunique"),
-    )
-    by_camp["share_of_event"] = by_camp.groupby("instance_key")["impressions"].transform(lambda s: s / s.sum() * 100)
-    by_camp["cpm"] = (by_camp["spend"] / by_camp["impressions"] * 1000).where(by_camp["impressions"] > 0)
-    by_camp["ctr"] = (by_camp["clicks"] / by_camp["impressions"] * 100).where(by_camp["impressions"] > 0)
+    has_adset = "adset_name" in attributed_ads.columns if not attributed_ads.empty else False
+    if not attributed_ads.empty:
+        group_cols = ["instance_key", "event_name", "event_instance_date", "campaign"]
+        if has_adset:
+            group_cols.append("adset_name")
+        by_camp = attributed_ads.groupby(group_cols, as_index=False).agg(
+            impressions=("impressions", "sum"), spend=("spend", "sum"), clicks=("clicks", "sum"),
+            first_day=("date", "min"), last_day=("date", "max"), ad_days=("date", "nunique"),
+        )
+        by_camp["share_of_event"] = by_camp.groupby("instance_key")["impressions"].transform(lambda s: s / s.sum() * 100)
+        by_camp["ctr"] = (by_camp["clicks"] / by_camp["impressions"] * 100).where(by_camp["impressions"] > 0)
+    else:
+        by_camp = pd.DataFrame()
 
-    # Render: one collapsible block per event (newest first)
-    events = by_camp.sort_values("event_instance_date", ascending=False)["instance_key"].drop_duplicates().tolist()
+    # Event metadata + ordering across BOTH ads and posts
+    meta_frames = []
+    if not attributed_ads.empty:
+        meta_frames.append(attributed_ads[["instance_key", "event_name", "event_instance_date"]])
+    if attributed_posts is not None and not attributed_posts.empty:
+        meta_frames.append(attributed_posts[["instance_key", "event_name", "event_instance_date"]])
+    meta_all = pd.concat(meta_frames, ignore_index=True).dropna(subset=["instance_key"])
+    meta_all["event_instance_date"] = pd.to_datetime(meta_all["event_instance_date"], utc=True, errors="coerce")
+    meta_all = meta_all.sort_values("event_instance_date", ascending=False).drop_duplicates("instance_key")
+
     blocks = []
-    for ik in events:
-        ev_camps = by_camp[by_camp["instance_key"] == ik].sort_values("impressions", ascending=False)
-        if ev_camps.empty:
-            continue
-        meta = ev_camps.iloc[0]
-        date_str = pd.to_datetime(meta["event_instance_date"]).strftime("%b %d, %Y")
-        total_imp = int(ev_camps["impressions"].sum())
-        total_spend = float(ev_camps["spend"].sum())
-        rows_html = ""
-        for _, c in ev_camps.iterrows():
-            d_from = c["first_day"].strftime("%b %-d")
-            d_to = c["last_day"].strftime("%b %-d")
-            ctr_txt = f"{c['ctr']:.2f}%" if pd.notna(c["ctr"]) else "—"
-            adset_html = f"<br><span class='adset'>↳ {c['adset_name']}</span>" if has_adset and c.get("adset_name") else ""
-            rows_html += f"""
-            <tr>
-              <td><b>{c['campaign']}</b>{adset_html}</td>
-              <td>{d_from} – {d_to}</td>
-              <td class='num'>{int(c['ad_days'])}</td>
-              <td class='num'>{int(c['impressions']):,}</td>
-              <td class='num'><b>{c['share_of_event']:.0f}%</b></td>
-              <td class='num'>${c['spend']:,.0f}</td>
-              <td class='num'>{ctr_txt}</td>
-            </tr>"""
-        n_campaigns = ev_camps["campaign"].nunique()
-        n_adsets = ev_camps["adset_name"].nunique() if has_adset else len(ev_camps)
-        blocks.append(f"""
-        <details class="campaign-breakdown">
-          <summary>
-            <b>{meta['event_name']}</b> &nbsp;·&nbsp; {date_str}
-            &nbsp;·&nbsp; {total_imp:,} impressions &nbsp;·&nbsp; ${total_spend:,.0f} spend
-            &nbsp;·&nbsp; {n_campaigns} campaign{'s' if n_campaigns != 1 else ''} / {n_adsets} ad set{'s' if n_adsets != 1 else ''}
-          </summary>
+    for _, m in meta_all.iterrows():
+        ik = str(m["instance_key"])
+        date_str = pd.to_datetime(m["event_instance_date"]).strftime("%b %-d, %Y") if pd.notna(m["event_instance_date"]) else "—"
+        ev_camps = by_camp[by_camp["instance_key"].astype(str) == ik].sort_values("impressions", ascending=False) if not by_camp.empty else pd.DataFrame()
+        ev_posts = (attributed_posts[attributed_posts["instance_key"].astype(str) == ik].sort_values("views", ascending=False)
+                    if attributed_posts is not None and not attributed_posts.empty else pd.DataFrame())
+
+        total_imp = int(ev_camps["impressions"].sum()) if not ev_camps.empty else 0
+        total_spend = float(ev_camps["spend"].sum()) if not ev_camps.empty else 0.0
+        total_post_views = int(ev_posts["views"].sum()) if not ev_posts.empty else 0
+
+        # --- Ads table ---
+        ads_table = ""
+        if not ev_camps.empty:
+            rows_html = ""
+            for _, c in ev_camps.iterrows():
+                d_from = c["first_day"].strftime("%b %-d"); d_to = c["last_day"].strftime("%b %-d")
+                ctr_txt = f"{c['ctr']:.2f}%" if pd.notna(c["ctr"]) else "—"
+                adset_html = f"<br><span class='adset'>↳ {c['adset_name']}</span>" if has_adset and c.get("adset_name") else ""
+                rows_html += f"""
+              <tr><td><b>{c['campaign']}</b>{adset_html}</td><td>{d_from} – {d_to}</td>
+                <td class='num'>{int(c['ad_days'])}</td><td class='num'>{int(c['impressions']):,}</td>
+                <td class='num'><b>{c['share_of_event']:.0f}%</b></td><td class='num'>${c['spend']:,.0f}</td>
+                <td class='num'>{ctr_txt}</td></tr>"""
+            ads_table = f"""
+          <h5 class="bd-sub">Paid ad sets ({total_imp:,} impressions · ${total_spend:,.0f})</h5>
           <table class="scenarios">
             <thead><tr><th>Campaign / Ad set</th><th>Active</th><th>Days</th><th>Impressions</th><th>Share</th><th>Spend</th><th>CTR</th></tr></thead>
             <tbody>{rows_html}</tbody>
-          </table>
+          </table>"""
+
+        # --- Organic posts table ---
+        posts_table = ""
+        if not ev_posts.empty:
+            prows = ""
+            for _, p in ev_posts.iterrows():
+                ch = "IG" if p["channel"] == "instagram_organic" else "TikTok"
+                origin = {"owned": "owned", "team": "owned", "collab": "earned·amp", "earned": "earned"}.get(p.get("origin"), "—")
+                cap = (p["caption"][:80] + "…") if len(p["caption"]) > 80 else p["caption"]
+                cap = cap.replace("\n", " ")
+                link = f"<a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
+                prows += f"""
+              <tr><td>{ch}</td><td>@{p.get('owner','')}</td><td>{origin}</td>
+                <td class='num'><b>{int(p['views']):,}</b></td><td class='num'>{int(p['likes']):,}</td>
+                <td class='post-caption'>{cap} {link}</td></tr>"""
+            posts_table = f"""
+          <h5 class="bd-sub">Organic posts ({len(ev_posts)} · {total_post_views:,} views)</h5>
+          <table class="scenarios">
+            <thead><tr><th>Ch</th><th>Author</th><th>Type</th><th>Views</th><th>Likes</th><th>Caption</th></tr></thead>
+            <tbody>{prows}</tbody>
+          </table>"""
+
+        summary_bits = []
+        if total_imp:
+            summary_bits.append(f"{total_imp:,} paid impressions · ${total_spend:,.0f}")
+        if total_post_views:
+            summary_bits.append(f"{len(ev_posts)} organic post{'s' if len(ev_posts)!=1 else ''} · {total_post_views:,} views")
+        summary_line = " &nbsp;·&nbsp; ".join(summary_bits) if summary_bits else "no data"
+        blocks.append(f"""
+        <details class="campaign-breakdown">
+          <summary><b>{m['event_name']}</b> &nbsp;·&nbsp; {date_str} &nbsp;·&nbsp; {summary_line}</summary>
+          {ads_table}{posts_table}
         </details>""")
     return "".join(blocks)
 
@@ -959,7 +990,7 @@ def render() -> str:
     top_html = build_top_events_chart(tickets)
     marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
     marketing_pace_html = build_marketing_pace_chart(tickets, attributed_ads)
-    campaign_breakdown_html = build_campaign_breakdown(attributed_ads)
+    campaign_breakdown_html = build_campaign_breakdown(attributed_ads, attributed_posts)
     review_queue_html = build_review_queue(attributed_posts, tickets)
     unified_channel_html = build_unified_channel_table(unified_summary)
     recommendations_html = build_recommendations_banner(summary, marketing_table, attributed_ads, attributed_posts, tickets)
@@ -1028,6 +1059,8 @@ def render() -> str:
   details.campaign-breakdown table th,
   details.campaign-breakdown table td {{ font-size: 12px; padding: 8px 16px; }}
   span.adset {{ color: #64748b; font-size: 11px; font-weight: 400; }}
+  h5.bd-sub {{ margin: 12px 16px 4px; font-size: 11px; text-transform: uppercase;
+               letter-spacing: .04em; color: #64748b; }}
   span.subnum {{ color: #94a3b8; font-size: 11px; font-weight: 400; }}
   span.gap-flag {{ margin-left: 6px; cursor: help; }}
   td.post-caption {{ max-width: 360px; font-size: 12px; color: #475569;
