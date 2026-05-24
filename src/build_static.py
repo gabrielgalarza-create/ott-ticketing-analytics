@@ -723,63 +723,127 @@ def render() -> str:
           <td class='why'>{reason}</td>
         </tr>"""
 
-    # ---- Target trackers ----
-    target_blocks = []
-    for _, r in upcoming.iterrows():
-        if pd.isna(r["target_tickets"]):
-            continue
-        target = int(r["target_tickets"])
-        sold = int(r["tickets_sold"])
-        days = int(r["days_until_event"])
-        gap = max(0, target - sold)
-        pct_to_target = sold / target * 100
-        forecast_ok = pd.notna(r["forecast_final"]) and r["forecast_final"] >= target
+    # ---- Target trackers (filterable by ANY event) ----
+    # Order: upcoming first (soonest first), then past (most recent first)
+    tracker_order = pd.concat([
+        upcoming.sort_values("event_instance_date"),
+        past.sort_values("event_instance_date", ascending=False),
+    ], ignore_index=True)
 
-        per_day = (gap / days) if days > 0 else gap
-        forecast_text = (
-            f"Forecast pace lands at ~{int(r['forecast_final'])} ({int(r['forecast_low'])}–{int(r['forecast_high'])})"
-            if pd.notna(r["forecast_final"]) else "no forecast yet (need comparable past events)"
-        )
-        verdict = ("✅ on track to hit target" if forecast_ok
-                   else "⚠️ off target — extra marketing push needed")
-        # Build the comparables table that powers this forecast
-        fc_detail = forecast_final_tickets(tickets, r)
+    target_blocks = []
+    dropdown_opts = []
+    # Default to the soonest upcoming event that has an explicit target, else first upcoming
+    default_key = None
+    with_target = upcoming[upcoming["target_tickets"].notna()].sort_values("event_instance_date")
+    if not with_target.empty:
+        default_key = str(with_target.iloc[0]["instance_key"])
+    elif not upcoming.empty:
+        default_key = str(upcoming.sort_values("event_instance_date").iloc[0]["instance_key"])
+    elif not tracker_order.empty:
+        default_key = str(tracker_order.iloc[0]["instance_key"])
+
+    for _, r in tracker_order.iterrows():
+        ik = str(r["instance_key"])
+        is_upcoming = r["status"] != "past"
+        sold = int(r["tickets_sold"])
+        date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d, %Y")
+        # Target = explicit target_tickets, else capacity, else None
+        if pd.notna(r["target_tickets"]):
+            target, target_kind = int(r["target_tickets"]), "target"
+        elif pd.notna(r["capacity"]):
+            target, target_kind = int(r["capacity"]), "capacity"
+        else:
+            target, target_kind = None, None
+
+        # Progress bar + headline
+        if target:
+            pct = min(100, sold / target * 100)
+            pct_raw = sold / target * 100
+            head = f"{r['event_name']} → {target_kind} {target:,} tickets"
+            progress = f"""
+          <div class="progress-row">
+            <div class="progress-bar"><div class="progress-fill" style="width:{pct:.1f}%"></div></div>
+            <div class="progress-label"><b>{sold:,}</b> / {target:,} ({pct_raw:.0f}%)</div>
+          </div>"""
+        else:
+            head = f"{r['event_name']} → {sold:,} tickets sold"
+            progress = ""
+
+        # Forecast / gap (upcoming only)
+        body = ""
         comp_html = ""
-        if fc_detail.get("comparables"):
-            comp_rows = ""
-            for c in fc_detail["comparables"]:
-                star = " ⭐" if c["same_series"] else ""
-                comp_rows += (
-                    f"<tr><td>{c['name']}{star}</td>"
-                    f"<td>{c['date'].strftime('%b %d, %Y')}</td>"
-                    f"<td class='num'>${int(c['mode_price'])}</td>"
-                    f"<td class='num'>{c['final']:,}</td>"
-                    f"<td class='num'>{c['cum_at_stage']:,} ({c['pct_at_stage']:.0f}%)</td>"
-                    f"<td class='num'><b>{c['remaining_from_stage']:,}</b></td></tr>"
-                )
-            comp_html = f"""
+        if is_upcoming:
+            days = int(r["days_until_event"])
+            forecast_text = (
+                f"Forecast pace lands at ~{int(r['forecast_final'])} ({int(r['forecast_low'])}–{int(r['forecast_high'])})"
+                if pd.notna(r["forecast_final"]) else "no forecast yet (need comparable past events)"
+            )
+            if target:
+                forecast_ok = pd.notna(r["forecast_final"]) and r["forecast_final"] >= target
+                verdict = ("✅ on track to hit target" if forecast_ok
+                           else "⚠️ off target — extra marketing push needed")
+                gap = max(0, target - sold)
+                per_day = (gap / days) if days > 0 else gap
+                body = (f"<p>{verdict} · {forecast_text}</p>"
+                        f"<p><b>{gap:,} more tickets needed in {days} days</b> = {per_day:.0f}/day average</p>")
+            else:
+                body = f"<p>{forecast_text} · {days} days out</p>"
+            fc_detail = forecast_final_tickets(tickets, r)
+            if fc_detail.get("comparables"):
+                comp_rows = ""
+                for c in fc_detail["comparables"]:
+                    star = " ⭐" if c["same_series"] else ""
+                    comp_rows += (
+                        f"<tr><td>{c['name']}{star}</td>"
+                        f"<td>{c['date'].strftime('%b %d, %Y')}</td>"
+                        f"<td class='num'>${int(c['mode_price'])}</td>"
+                        f"<td class='num'>{c['final']:,}</td>"
+                        f"<td class='num'>{c['cum_at_stage']:,} ({c['pct_at_stage']:.0f}%)</td>"
+                        f"<td class='num'><b>{c['remaining_from_stage']:,}</b></td></tr>"
+                    )
+                comp_html = f"""
             <h4>Comparables used in this forecast</h4>
             <table class="scenarios">
-              <thead><tr><th>Past event</th><th>Date</th><th>Price</th><th>Final</th><th>Sold by T-{int(days)}d</th><th>Remaining from this stage</th></tr></thead>
+              <thead><tr><th>Past event</th><th>Date</th><th>Price</th><th>Final</th><th>Sold by T-{days}d</th><th>Remaining from this stage</th></tr></thead>
               <tbody>{comp_rows}</tbody>
             </table>
-            <p class="caption">⭐ = same series as this event (matched by name keywords). Forecast = current sold ({sold:,}) + median remaining from these comparables ({fc_detail.get('median_remaining', 0):,}) = {fc_detail.get('forecast', 0):,}.</p>"""
+            <p class="caption">⭐ = same series. Forecast = current sold ({sold:,}) + median remaining from these comparables ({fc_detail.get('median_remaining', 0):,}) = {fc_detail.get('forecast', 0):,}.</p>"""
+        else:
+            att = f"{r['attendance_rate_pct']:.0f}% showed up" if pd.notna(r["attendance_rate_pct"]) else ""
+            body = f"<p>Final: <b>{sold:,}</b> tickets · {int(r['attended_count'])} attended · {att} · {money(r['net_revenue'])} revenue</p>"
+
+        mkt = build_marketing_block(r, marketing_table, attributed_ads, target or sold, int(r["days_until_event"]) if is_upcoming else 1)
+        display = "block" if ik == default_key else "none"
         target_blocks.append(f"""
-        <div class="target-card">
-          <h3>{r['event_name']} → target {target:,} tickets</h3>
-          <div class="progress-row">
-            <div class="progress-bar"><div class="progress-fill" style="width:{min(100, pct_to_target):.1f}%"></div></div>
-            <div class="progress-label"><b>{sold:,}</b> / {target:,} ({pct_to_target:.0f}%)</div>
-          </div>
-          <p>{verdict} · {forecast_text}</p>
-          <p><b>{gap:,} more tickets needed in {days} days</b> = {per_day:.0f}/day average</p>
-          {build_marketing_block(r, marketing_table, attributed_ads, target, days)}
-          {build_top_posts_block(attributed_posts, r['instance_key'], n=5)}
+        <div class="target-card tracker-card" data-key="{ik}" style="display:{display}">
+          <h3>{head}</h3>{progress}
+          {body}
+          {mkt}
+          {build_top_posts_block(attributed_posts, ik, n=5)}
           {comp_html}
         </div>""")
-    target_trackers_html = (
-        "<h2>Target trackers</h2>" + "".join(target_blocks)
-    ) if target_blocks else ""
+        label = f"{'⏳ ' if is_upcoming else ''}{r['event_name']} ({date_str})"
+        sel = " selected" if ik == default_key else ""
+        dropdown_opts.append(f"<option value='{ik}'{sel}>{label}</option>")
+
+    if target_blocks:
+        target_trackers_html = f"""
+    <h2>Target tracker</h2>
+    <div style="margin-bottom:14px">
+      <label class="subnum" for="tracker-select">Show event:&nbsp;</label>
+      <select id="tracker-select" class="attr-select" style="max-width:420px;display:inline-block;width:auto"
+              onchange="ottShowTracker(this.value)">{''.join(dropdown_opts)}</select>
+    </div>
+    {''.join(target_blocks)}
+    <script>
+      function ottShowTracker(key) {{
+        document.querySelectorAll('.tracker-card').forEach(c => {{
+          c.style.display = (c.dataset.key === key) ? 'block' : 'none';
+        }});
+      }}
+    </script>"""
+    else:
+        target_trackers_html = ""
 
     # ---- Per-event curves ----
     curves_html = ""
@@ -804,7 +868,6 @@ def render() -> str:
           <td class='num'>{money(r['net_revenue'])}</td>
         </tr>"""
 
-    velocity_html = build_velocity_chart(tickets)
     top_html = build_top_events_chart(tickets)
     marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
     marketing_pace_html = build_marketing_pace_chart(tickets, attributed_ads)
@@ -974,8 +1037,6 @@ def render() -> str:
   <h2>Review queue — posts needing attribution confirmation</h2>
   {review_queue_html}
 
-  <h2>Sales velocity</h2>
-  <div class="chart-box">{velocity_html}</div>
 
   <h2>Portfolio</h2>
   <div class="chart-box">{top_html}</div>
