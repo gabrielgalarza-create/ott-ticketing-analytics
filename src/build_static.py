@@ -193,6 +193,94 @@ def build_unified_channel_table(unified_summary: pd.DataFrame) -> str:
     </table>"""
 
 
+def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.DataFrame,
+                                 attributed_ads: pd.DataFrame, attributed_posts: pd.DataFrame,
+                                 tickets: pd.DataFrame) -> str:
+    """Top-of-dashboard 'what lever to pull' recommendation for each behind-pace upcoming event,
+    plus the proven content formats worth replicating."""
+    from src.marketing import current_pace, recommended_daily_spend
+
+    upcoming = summary[summary["status"] != "past"].copy()
+    if upcoming.empty:
+        return ""
+
+    rec_cards = []
+    for _, r in upcoming.sort_values("event_instance_date").iterrows():
+        ik = str(r["instance_key"])
+        days = int(r["days_until_event"]) if pd.notna(r["days_until_event"]) else 0
+        sold = int(r["tickets_sold"])
+        target = (int(r["target_tickets"]) if pd.notna(r["target_tickets"])
+                  else (int(r["capacity"]) if pd.notna(r["capacity"]) else None))
+        if not target or days <= 0:
+            continue
+        forecast = r["forecast_final"] if pd.notna(r["forecast_final"]) else None
+        on_track = forecast is not None and forecast >= target
+
+        rec = recommended_daily_spend(r, marketing_table, target, days) or {}
+        pace = current_pace(attributed_ads, ik, days=7)
+        cur_imp = pace.get("daily_impressions", 0) or 0
+        cur_spend = pace.get("daily_spend", 0) or 0
+        need_imp = rec.get("daily_impressions_needed", 0) or 0
+        need_spend = rec.get("daily_spend_needed", 0) or 0
+
+        # Marketing efficiency for this event (impressions per ticket) vs series history
+        mt_row = marketing_table[marketing_table["instance_key"] == ik]
+        ipt = float(mt_row.iloc[0]["impressions_per_ticket"]) if not mt_row.empty and pd.notna(mt_row.iloc[0].get("impressions_per_ticket")) else None
+        hist_ipt = rec.get("median_impressions_per_ticket")
+
+        if on_track:
+            verdict, color = "✅ On track", "#16a34a"
+            action = f"Hold current pace. Forecast ~{int(forecast):,} vs {target:,} target."
+        else:
+            verdict, color = "🔴 Behind — action needed", "#dc2626"
+            fc_txt = f"forecast ~{int(forecast):,}" if forecast is not None else "no forecast yet"
+            # Decide the lever: under-investing in reach vs. conversion problem
+            mult = (need_imp / cur_imp) if cur_imp > 0 else None
+            if cur_imp == 0:
+                action = (f"<b>No ads running.</b> Start paid now at <b>~${need_spend:,.0f}/day</b> "
+                          f"(~{need_imp:,} impressions/day) to close the gap to {target:,}.")
+            elif mult is not None and mult >= 1.5:
+                action = (f"<b>Under-investing in reach.</b> Scale paid spend to <b>~${need_spend:,.0f}/day</b> "
+                          f"(now ~${cur_spend:,.0f}/day) — about <b>{mult:.1f}× current</b> impressions. {fc_txt}.")
+            elif ipt is not None and hist_ipt is not None and ipt > hist_ipt * 1.3:
+                action = (f"<b>Reach is OK but conversion is weak</b> ({ipt:.0f} impressions/ticket vs "
+                          f"~{hist_ipt:.0f} historical). Don't just spend more — refresh creative & lean on the "
+                          f"proven formats below. {fc_txt}.")
+            else:
+                action = (f"Lift marketing ~{mult:.1f}× to <b>~${need_spend:,.0f}/day</b> "
+                          f"({need_imp:,} impressions/day) and keep posting. {fc_txt}.")
+        date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
+        rec_cards.append(f"""
+        <div class="rec-card" style="border-left:4px solid {color}">
+          <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str} · {days}d out · {sold:,}/{target:,} sold</span></div>
+          <div class="rec-verdict" style="color:{color}">{verdict}</div>
+          <div class="rec-action">{action}</div>
+        </div>""")
+
+    # Proven content formats: top organic posts by views across all events
+    formats_html = ""
+    if not attributed_posts.empty:
+        top = attributed_posts.sort_values("views", ascending=False).head(4)
+        rows = ""
+        for _, p in top.iterrows():
+            ch = "IG" if p["channel"] == "instagram_organic" else "TikTok"
+            cap = (p["caption"][:90] + "…") if len(p["caption"]) > 90 else p["caption"]
+            cap = cap.replace("\n", " ")
+            link = f"<a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
+            rows += f"<li><b>{int(p['views']):,} views</b> · {ch} · @{p.get('owner','')} — {cap} {link}</li>"
+        formats_html = f"""
+        <div class="rec-card" style="border-left:4px solid #6366f1">
+          <div class="rec-head">📈 Proven content formats (your highest-reach posts — make more like these)</div>
+          <ul class="rec-list">{rows}</ul>
+        </div>"""
+
+    if not rec_cards and not formats_html:
+        return ""
+    return f"""
+    <h2 style="margin-top:0">🎯 What to dial up now</h2>
+    <div class="rec-grid">{''.join(rec_cards)}{formats_html}</div>"""
+
+
 def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) -> str:
     """Show ambiguous posts that need manual attribution review."""
     if attributed_posts.empty or "is_ambiguous" not in attributed_posts.columns:
@@ -874,6 +962,7 @@ def render() -> str:
     campaign_breakdown_html = build_campaign_breakdown(attributed_ads)
     review_queue_html = build_review_queue(attributed_posts, tickets)
     unified_channel_html = build_unified_channel_table(unified_summary)
+    recommendations_html = build_recommendations_banner(summary, marketing_table, attributed_ads, attributed_posts, tickets)
 
     paid_n, free_n = rates.get("paid_n", 0), rates.get("free_n", 0)
 
@@ -945,6 +1034,14 @@ def render() -> str:
                      overflow: hidden; text-overflow: ellipsis; }}
   .earned-cell {{ color: #16a34a; font-weight: 700; }}
   .collab-cell {{ color: #ea580c; font-weight: 700; }}
+  .rec-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+  .rec-card {{ background: #fff; border: 1px solid #e2e8f0; border-radius: 10px;
+               padding: 16px 18px; }}
+  .rec-head {{ font-weight: 700; font-size: 14px; color: #0f172a; margin-bottom: 6px; }}
+  .rec-verdict {{ font-weight: 700; font-size: 13px; margin-bottom: 6px; }}
+  .rec-action {{ font-size: 13px; color: #334155; line-height: 1.5; }}
+  .rec-list {{ margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: #334155; line-height: 1.6; }}
+  @media (max-width: 820px) {{ .rec-grid {{ grid-template-columns: 1fr; }} }}
   code.ik {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
               background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #475569; }}
   .ch-badge {{ display: inline-block; background: #6366f1; color: #fff; padding: 2px 8px;
@@ -984,6 +1081,8 @@ def render() -> str:
 </header>
 <main>
   <div class="cards">{cards_html}</div>
+
+  {recommendations_html}
 
   <h2>Pipeline health — upcoming events</h2>
   <table>
