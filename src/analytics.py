@@ -132,6 +132,43 @@ def load_waitlist() -> pd.DataFrame:
     return df
 
 
+def event_index(tickets: pd.DataFrame, waitlist: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Canonical event universe: every event we know about, from tickets PLUS waitlist-only
+    events (on pre-sale/waitlist before ticket sales open, so they have 0 tickets yet).
+
+    Returns columns: instance_key, event_name, event_address_name, event_instance_date,
+    event_base_id, has_tickets.
+    """
+    frames = []
+    if tickets is not None and not tickets.empty:
+        tev = tickets.groupby("instance_key", as_index=False).agg(
+            event_name=("event_name", "last"),
+            event_address_name=("event_address_name", "last"),
+            event_instance_date=("event_instance_date", "last"),
+            event_base_id=("event_base_id", "last"),
+        )
+        tev["has_tickets"] = True
+        frames.append(tev)
+    known = set(frames[0]["instance_key"].astype(str)) if frames else set()
+    if waitlist is not None and not waitlist.empty and "instance_key" in waitlist.columns:
+        wev = waitlist.groupby("instance_key", as_index=False).agg(
+            event_name=("event_name", "last"),
+            event_instance_date=("event_instance_date", "last"),
+        )
+        wev["instance_key"] = wev["instance_key"].astype(str)
+        wev = wev[~wev["instance_key"].isin(known)]
+        if not wev.empty:
+            wev["event_address_name"] = ""
+            wev["event_base_id"] = wev["instance_key"]
+            wev["has_tickets"] = False
+            frames.append(wev)
+    if not frames:
+        return pd.DataFrame(columns=["instance_key", "event_name", "event_address_name",
+                                     "event_instance_date", "event_base_id", "has_tickets"])
+    out = pd.concat(frames, ignore_index=True)
+    return out.sort_values("event_instance_date")
+
+
 def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.DataFrame, now: pd.Timestamp | None = None) -> pd.DataFrame:
     """One row per event instance (event_base_id, event_instance_date)."""
     if tickets.empty:
@@ -159,6 +196,30 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
         paid_attended=("was_used", lambda s: (s & ~tickets.loc[s.index, "is_free"]).sum()),
         free_attended=("was_used", lambda s: (s & tickets.loc[s.index, "is_free"]).sum()),
     ).reset_index()
+
+    # Add waitlist-only events (on pre-sale/waitlist before tickets open → 0 tickets yet)
+    if waitlist is not None and not waitlist.empty and "instance_key" in waitlist.columns:
+        known = set(grouped["instance_key"].astype(str))
+        wl_ev = waitlist.groupby("instance_key", as_index=False).agg(
+            event_name=("event_name", "last"),
+            event_instance_date=("event_instance_date", "last"),
+        )
+        wl_ev["instance_key"] = wl_ev["instance_key"].astype(str)
+        wl_ev = wl_ev[~wl_ev["instance_key"].isin(known)]
+        if not wl_ev.empty:
+            wl_ev["event_base_id"] = wl_ev["instance_key"]
+            wl_ev["event_alias"] = ""
+            wl_ev["event_address_name"] = ""
+            for col in ("tickets_sold", "paid_tickets", "free_tickets", "gross_revenue",
+                        "discounts", "net_revenue", "unique_orders", "attended_count",
+                        "paid_attended", "free_attended"):
+                wl_ev[col] = 0
+            wl_ev["first_sale"] = pd.NaT
+            wl_ev["last_sale"] = pd.NaT
+            grouped = pd.concat([grouped, wl_ev], ignore_index=True)
+            # Concat can coerce tz-aware datetime columns to object — restore datetime dtype
+            for col in ("event_instance_date", "first_sale", "last_sale"):
+                grouped[col] = pd.to_datetime(grouped[col], utc=True, errors="coerce")
 
     grouped["days_until_event"] = (grouped["event_instance_date"] - now).dt.days
     grouped["days_on_sale"] = (now - grouped["first_sale"]).dt.days.clip(lower=0)
