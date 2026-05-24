@@ -432,7 +432,7 @@ def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFra
         if sub.empty:
             continue
         sub["impressions_cum"] = sub["impressions"].cumsum()
-        date_str = pd.to_datetime(e["event_instance_date"]).strftime("%b %Y")
+        date_str = pd.to_datetime(e["event_instance_date"]).strftime("%b %-d, %Y")
         if e["is_upcoming"]:
             color = UPCOMING_COLORS[upcoming_idx % len(UPCOMING_COLORS)]; upcoming_idx += 1
             visibility = True
@@ -626,7 +626,7 @@ def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
             other_idx += 1
             visibility = "legendonly"  # hidden until user clicks to show
 
-        date_str = c["date"].strftime("%b %Y")
+        date_str = c["date"].strftime("%b %-d, %Y")
         star = "⭐ " if c["same_series"] else ""
         label = f"{star}{c['name']} · {date_str} · final {c['final']}"
         fig.add_trace(go.Scatter(
