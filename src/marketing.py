@@ -150,36 +150,51 @@ def _event_series(event_name) -> str | None:
     return None
 
 
+def _lookback_map(capacities: pd.DataFrame | None) -> dict[str, int]:
+    """Per-event lookback override (capacities.csv column `lookback_days`). Falls back to
+    MAX_LOOKBACK_DAYS. Lets a long pre-sale event (e.g. Tahoe ~6 months out) count earlier ads."""
+    out: dict[str, int] = {}
+    if capacities is not None and not capacities.empty and "lookback_days" in capacities.columns:
+        for _, r in capacities.iterrows():
+            v = pd.to_numeric(r.get("lookback_days"), errors="coerce")
+            if pd.notna(v):
+                out[str(r["instance_key"])] = int(v)
+    return out
+
+
 def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
-                            capacities: pd.DataFrame | None = None) -> pd.DataFrame:
+                            capacities: pd.DataFrame | None = None,
+                            waitlist: pd.DataFrame | None = None) -> pd.DataFrame:
     """For each ad-day, attribute spend/impressions to a specific event.
 
     Resolution order (per ad-day):
       1. Ad-set rule with name_hint → match a specific event by substring (e.g.
          "Sacramento" hint → "Sacramento" in event_name)
       2. Ad-set rule with no name_hint OR no rule but campaign hints series →
-         next FUTURE event in series that's not marked `marketing_skip` in capacities
-      3. No future event → most recent past event in series
+         next FUTURE event in series within the lookback window, not `marketing_skip`
+      3. No event within the lookback window → ad was for a prior event not in the data → skip
+
+    Lookback defaults to MAX_LOOKBACK_DAYS but can be overridden per-event via the
+    `lookback_days` column in capacities.csv. Waitlist-only events (e.g. an event on
+    pre-sale before tickets open) are included so ads can attribute to them.
     """
     if ads.empty or tickets.empty:
         return pd.DataFrame()
 
-    # Skip set from capacities.csv
+    from src.analytics import event_index  # local import to avoid circularity
+
     skip_keys = set()
     if capacities is not None and not capacities.empty and "marketing_skip" in capacities.columns:
         skip_series = capacities["marketing_skip"].astype(str).str.strip().str.lower()
         skip_keys = set(capacities.loc[skip_series.isin(("true", "1", "yes", "y")), "instance_key"].astype(str))
+    lookback_map = _lookback_map(capacities)
 
-    # Build event index — include address so location hints like "Sacramento" can match
-    ev = tickets.groupby("instance_key", as_index=False).agg(
-        event_name=("event_name", "last"),
-        event_address_name=("event_address_name", "last"),
-        event_instance_date=("event_instance_date", "last"),
-        event_base_id=("event_base_id", "last"),
-    )
+    # Event universe = ticket events + waitlist-only events; include address for location hints
+    ev = event_index(tickets, waitlist).copy()
     ev["series"] = ev["event_name"].apply(_event_series)
     ev = ev.dropna(subset=["series", "event_instance_date"]).sort_values("event_instance_date")
     ev["search_text"] = (ev["event_name"].fillna("") + " " + ev["event_address_name"].fillna("")).str.lower()
+    ev["lookback"] = ev["instance_key"].astype(str).map(lookback_map).fillna(MAX_LOOKBACK_DAYS)
 
     rows = []
     for _, ad in ads.iterrows():
@@ -193,23 +208,21 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
         # venue address but not the event name). Hint matches bypass the marketing_skip filter
         # so an explicit caption like "San Jose coffee and r&b" still routes to San Jose Blend
         # even though San Jose is normally excluded from generic Blend attribution.
-        window_end = ad["date"] + pd.Timedelta(days=MAX_LOOKBACK_DAYS)
+        ad_date = ad["date"]
+        days_to = (ev["event_instance_date"] - ad_date).dt.days
+        within_window = (days_to >= 0) & (days_to <= ev["lookback"])
         target = None
         if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
             hint_lower = name_hint.lower()
-            same_series = ev[ev["series"] == series]
-            matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
+            hint_match = ev["search_text"].str.contains(hint_lower, regex=False, na=False)
+            matches = ev[(ev["series"] == series) & hint_match]
             if not matches.empty:
-                # Prefer the next future event within the lookback window; else most recent past
-                future = matches[(matches["event_instance_date"] >= ad["date"]) &
-                                 (matches["event_instance_date"] <= window_end)]
+                future = ev[(ev["series"] == series) & hint_match & within_window]
                 target = future.iloc[0] if not future.empty else matches.iloc[-1]
 
         # 2. Default: next future event in series within the lookback window
         if target is None:
-            future = ev[(ev["series"] == series) &
-                        (ev["event_instance_date"] >= ad["date"]) &
-                        (ev["event_instance_date"] <= window_end) &
+            future = ev[(ev["series"] == series) & within_window &
                         (~ev["instance_key"].astype(str).isin(skip_keys))]
             if not future.empty:
                 target = future.iloc[0]

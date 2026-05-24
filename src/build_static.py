@@ -224,7 +224,14 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
         d = pd.to_datetime(p["date"]).strftime("%b %-d, %Y")
         cap = (p["caption"][:200] + "…") if len(p["caption"]) > 200 else p["caption"]
         cap = cap.replace("\n", " ")
-        url_link = f"<a href='{p['url']}' target='_blank' rel='noopener'>view ↗</a>" if p["url"] else ""
+        url = p["url"] or ""
+        # Fall back to a canonical IG/TikTok URL from the post_id if no permalink was captured
+        if not url:
+            pid = str(p["post_id"])
+            if p["channel"] == "tiktok_organic":
+                url = f"https://www.tiktok.com/@overthetopxp/video/{pid}"
+        post_link = (f"<a class='post-open' href='{url}' target='_blank' rel='noopener'>Open post ↗</a>"
+                     if url else "<span class='subnum'>no link</span>")
         current_key = str(p["instance_key"])
         current = ev_label.get(current_key, p["event_name"])
         alts = [k.strip() for k in (p.get("alt_instance_keys") or "").split(",") if k.strip()]
@@ -243,10 +250,10 @@ def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) ->
 
         rows_html += f"""
         <tr data-postid="{p['post_id']}" data-current="{current_key}">
-          <td><span class='ch-badge'>{ch_label}</span></td>
+          <td><span class='ch-badge'>{ch_label}</span><br>{post_link}</td>
           <td>{d}<br><span class='subnum'>@{p.get('owner', '')}</span></td>
           <td class='num'><b>{int(p['views']):,}</b></td>
-          <td class='post-caption'><b>Why flagged:</b> {p['ambiguity_reason']}<br><br>{cap} {url_link}</td>
+          <td class='post-caption'><b>Why flagged:</b> {p['ambiguity_reason']}<br><br>{cap}</td>
           <td><select class='attr-select' data-postid="{p['post_id']}" onchange='ottMarkChanged(this)'>{opt_html}</select></td>
         </tr>"""
 
@@ -648,12 +655,12 @@ def render() -> str:
     capacities = load_capacities()
     waitlist = load_waitlist()
     ads = load_ads()
-    attributed_ads = attribute_ads_to_events(ads, tickets, capacities) if not ads.empty else pd.DataFrame()
+    attributed_ads = attribute_ads_to_events(ads, tickets, capacities, waitlist) if not ads.empty else pd.DataFrame()
     ad_summary = event_marketing_summary(attributed_ads)
     marketing_table = event_marketing_table(tickets, ad_summary) if not tickets.empty else pd.DataFrame()
     # Organic social: IG + TikTok posts attributed to events by caption keyword
     social_posts = load_all_posts()
-    attributed_posts = attribute_posts_to_events(social_posts, tickets, capacities) if not social_posts.empty else pd.DataFrame()
+    attributed_posts = attribute_posts_to_events(social_posts, tickets, capacities, waitlist) if not social_posts.empty else pd.DataFrame()
     unified_summary = unified_marketing_summary(tickets, attributed_ads, attributed_posts)
 
     updated = pd.Timestamp.now(tz="US/Pacific").strftime("%B %d, %Y at %-I:%M %p PT")
@@ -879,6 +886,8 @@ def render() -> str:
               background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #475569; }}
   .ch-badge {{ display: inline-block; background: #6366f1; color: #fff; padding: 2px 8px;
                 border-radius: 4px; font-size: 11px; font-weight: 700; }}
+  a.post-open {{ display: inline-block; margin-top: 6px; font-size: 11px; font-weight: 700;
+                  color: #6366f1; white-space: nowrap; }}
   .post-caption {{ max-width: 360px; font-size: 12px; color: #475569; }}
   select.attr-select {{ width: 100%; padding: 7px 8px; border: 1px solid #e2e8f0;
                          border-radius: 6px; font-size: 12px; background: #fff; }}

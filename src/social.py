@@ -330,7 +330,8 @@ def _detect_ambiguity(p: pd.Series, target: pd.Series, ev: pd.DataFrame) -> tupl
 
 
 def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
-                               capacities: pd.DataFrame | None = None) -> pd.DataFrame:
+                               capacities: pd.DataFrame | None = None,
+                               waitlist: pd.DataFrame | None = None) -> pd.DataFrame:
     """Map each post to a specific event using the same routing as ad-set attribution.
 
     Also annotates posts with `is_ambiguous`, `ambiguity_reason`, and `alt_instance_keys`
@@ -347,15 +348,15 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
 
     overrides = load_post_overrides()
 
-    ev = tickets.groupby("instance_key", as_index=False).agg(
-        event_name=("event_name", "last"),
-        event_address_name=("event_address_name", "last"),
-        event_instance_date=("event_instance_date", "last"),
-        event_base_id=("event_base_id", "last"),
-    )
+    from src.analytics import event_index
+    from src.marketing import _lookback_map
+    lookback_map = _lookback_map(capacities)
+
+    ev = event_index(tickets, waitlist).copy()
     ev["series"] = ev["event_name"].apply(_event_series)
     ev = ev.dropna(subset=["series", "event_instance_date"]).sort_values("event_instance_date")
     ev["search_text"] = (ev["event_name"].fillna("") + " " + ev["event_address_name"].fillna("")).str.lower()
+    ev["lookback"] = ev["instance_key"].astype(str).map(lookback_map).fillna(MAX_LOOKBACK_DAYS)
 
     rows = []
     for _, p in posts.iterrows():
@@ -376,36 +377,28 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
             if not isinstance(series, str) or not series:
                 continue
             name_hint = p.get("target_name_hint")
-            # Promo lookback: a post promotes an event up to MAX_LOOKBACK_DAYS ahead.
+            # Promo lookback: a post promotes an event up to its (per-event) lookback ahead.
             # Recap window: a post can also recap an event up to RECAP_WINDOW_DAYS in the past.
-            window_end = p["date"] + pd.Timedelta(days=MAX_LOOKBACK_DAYS)
-            recap_start = p["date"] - pd.Timedelta(days=RECAP_WINDOW_DAYS)
+            days_to = (ev["event_instance_date"] - p["date"]).dt.days
+            within_promo = (days_to >= 0) & (days_to <= ev["lookback"])
+            within_recap = (days_to < 0) & (days_to >= -RECAP_WINDOW_DAYS)
             target = None
             if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
                 hint_lower = name_hint.lower()
-                same_series = ev[ev["series"] == series]
-                matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
-                if not matches.empty:
-                    future = matches[(matches["event_instance_date"] >= p["date"]) &
-                                     (matches["event_instance_date"] <= window_end)]
-                    if not future.empty:
-                        target = future.iloc[0]
-                    else:
-                        recap = matches[(matches["event_instance_date"] < p["date"]) &
-                                        (matches["event_instance_date"] >= recap_start)]
-                        target = recap.iloc[-1] if not recap.empty else None
+                hint_match = ev["search_text"].str.contains(hint_lower, regex=False, na=False)
+                future = ev[(ev["series"] == series) & hint_match & within_promo]
+                if not future.empty:
+                    target = future.iloc[0]
+                else:
+                    recap = ev[(ev["series"] == series) & hint_match & within_recap]
+                    target = recap.iloc[-1] if not recap.empty else None
             if target is None:
-                future = ev[(ev["series"] == series) &
-                            (ev["event_instance_date"] >= p["date"]) &
-                            (ev["event_instance_date"] <= window_end) &
+                future = ev[(ev["series"] == series) & within_promo &
                             (~ev["instance_key"].astype(str).isin(skip_keys))]
                 if not future.empty:
                     target = future.iloc[0]
                 else:
-                    # Recap fallback: most recent past event within the recap window
-                    recap = ev[(ev["series"] == series) &
-                               (ev["event_instance_date"] < p["date"]) &
-                               (ev["event_instance_date"] >= recap_start) &
+                    recap = ev[(ev["series"] == series) & within_recap &
                                (~ev["instance_key"].astype(str).isin(skip_keys))]
                     if recap.empty:
                         continue
@@ -496,7 +489,25 @@ def unified_marketing_summary(tickets: pd.DataFrame, attributed_ads: pd.DataFram
             revenue=("net_price", "sum"),
         )
         out = out.merge(meta, on="instance_key", how="left")
-        out["impressions_per_ticket"] = (out["total_impressions"] / out["tickets_sold"]).where(out["tickets_sold"] > 0)
+    else:
+        for c in ("event_name", "event_instance_date", "tickets_sold", "revenue"):
+            out[c] = pd.NaT if c == "event_instance_date" else (0 if c in ("tickets_sold", "revenue") else "")
+
+    # Backfill metadata for events with no tickets (e.g. waitlist-only events) from the
+    # attributed ads/posts, which carry event_name + event_instance_date.
+    backfill_src = [df for df in (attributed_ads, attributed_posts) if df is not None and not df.empty]
+    if backfill_src:
+        bf = pd.concat([df[["instance_key", "event_name", "event_instance_date"]] for df in backfill_src],
+                       ignore_index=True).dropna(subset=["instance_key"]).drop_duplicates("instance_key")
+        bf = bf.set_index("instance_key")
+        for idx, r in out.iterrows():
+            ik = r["instance_key"]
+            if (pd.isna(r.get("event_instance_date")) or not r.get("event_name")) and ik in bf.index:
+                out.at[idx, "event_name"] = bf.at[ik, "event_name"]
+                out.at[idx, "event_instance_date"] = bf.at[ik, "event_instance_date"]
+        out["tickets_sold"] = out["tickets_sold"].fillna(0)
+    out["event_instance_date"] = pd.to_datetime(out["event_instance_date"], utc=True, errors="coerce")
+    out["impressions_per_ticket"] = (out["total_impressions"] / out["tickets_sold"]).where(out.get("tickets_sold", 0) > 0)
     return out.sort_values("event_instance_date") if "event_instance_date" in out.columns else out
 
 
