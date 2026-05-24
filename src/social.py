@@ -16,7 +16,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.marketing import ADSET_RULES, _classify_adset, _event_series
+from src.marketing import ADSET_RULES, MAX_LOOKBACK_DAYS, _classify_adset, _event_series
+
+# A post can recap an event up to this many days after it happened.
+RECAP_WINDOW_DAYS = 30
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 IG_SNAPSHOT = DATA_DIR / "social_instagram.json"
@@ -373,26 +376,40 @@ def attribute_posts_to_events(posts: pd.DataFrame, tickets: pd.DataFrame,
             if not isinstance(series, str) or not series:
                 continue
             name_hint = p.get("target_name_hint")
+            # Promo lookback: a post promotes an event up to MAX_LOOKBACK_DAYS ahead.
+            # Recap window: a post can also recap an event up to RECAP_WINDOW_DAYS in the past.
+            window_end = p["date"] + pd.Timedelta(days=MAX_LOOKBACK_DAYS)
+            recap_start = p["date"] - pd.Timedelta(days=RECAP_WINDOW_DAYS)
             target = None
             if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
                 hint_lower = name_hint.lower()
                 same_series = ev[ev["series"] == series]
                 matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
                 if not matches.empty:
-                    future = matches[matches["event_instance_date"] >= p["date"]]
-                    target = future.iloc[0] if not future.empty else matches.iloc[-1]
+                    future = matches[(matches["event_instance_date"] >= p["date"]) &
+                                     (matches["event_instance_date"] <= window_end)]
+                    if not future.empty:
+                        target = future.iloc[0]
+                    else:
+                        recap = matches[(matches["event_instance_date"] < p["date"]) &
+                                        (matches["event_instance_date"] >= recap_start)]
+                        target = recap.iloc[-1] if not recap.empty else None
             if target is None:
                 future = ev[(ev["series"] == series) &
                             (ev["event_instance_date"] >= p["date"]) &
+                            (ev["event_instance_date"] <= window_end) &
                             (~ev["instance_key"].astype(str).isin(skip_keys))]
                 if not future.empty:
                     target = future.iloc[0]
                 else:
-                    past = ev[(ev["series"] == series) &
-                              (~ev["instance_key"].astype(str).isin(skip_keys))]
-                    if past.empty:
+                    # Recap fallback: most recent past event within the recap window
+                    recap = ev[(ev["series"] == series) &
+                               (ev["event_instance_date"] < p["date"]) &
+                               (ev["event_instance_date"] >= recap_start) &
+                               (~ev["instance_key"].astype(str).isin(skip_keys))]
+                    if recap.empty:
                         continue
-                    target = past.iloc[-1]
+                    target = recap.iloc[-1]
             is_amb, reason, alts = _detect_ambiguity(p, target, ev)
 
         rows.append({
