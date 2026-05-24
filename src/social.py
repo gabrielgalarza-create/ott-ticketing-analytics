@@ -119,7 +119,11 @@ def load_ig_posts(path: Path = IG_SNAPSHOT) -> pd.DataFrame:
     df["likes"] = pd.to_numeric(df.get("media_like_count"), errors="coerce").fillna(0).astype(int)
     df["comments"] = pd.to_numeric(df.get("media_comments_count"), errors="coerce").fillna(0).astype(int)
     df["shares"] = 0
-    df["url"] = df.get("media_permalink", "")
+    permalink = df.get("media_permalink", pd.Series([""] * len(df))).fillna("").astype(str)
+    shortcode = df.get("media_shortcode", pd.Series([""] * len(df))).fillna("").astype(str)
+    # Prefer the permalink; fall back to building the URL from the shortcode
+    df["url"] = permalink.where(permalink != "", "https://www.instagram.com/p/" + shortcode + "/")
+    df.loc[(permalink == "") & (shortcode == ""), "url"] = ""
     df["media_type"] = df.get("media_product_type", "")
     return df[["channel", "post_id", "date", "caption", "views", "reach", "likes", "comments", "shares", "url", "media_type"]]
 
