@@ -22,6 +22,13 @@ ADS_FB_SNAPSHOT = Path(__file__).resolve().parent.parent / "data" / "ads_faceboo
 # Matched in order; first hit wins. Series is the event-series token; the optional substring
 # narrows to a specific event in that series (e.g. "Sacramento" + "blend" → Sac Blend).
 # The fallback below handles generic ad sets ("the blend" → next "flagship" Blend, etc.).
+# An ad/post only attributes to an event if it ran within this many days BEFORE the event.
+# Stops ads for prior-year events (e.g. 2024/2025 Fit Fest campaigns that aren't in the
+# SweatPals data) from being force-attributed forward to the next event in the dataset.
+# OTT runs roughly monthly events and rarely promotes more than ~2 months out, so 120 days
+# is a generous cap that still excludes the 270-500-day-old stale campaigns.
+MAX_LOOKBACK_DAYS = 120
+
 ADSET_RULES: list[tuple[str, str, str | None]] = [
     # Most specific first. The first matching rule wins, so the order matters.
 
@@ -186,30 +193,29 @@ def attribute_ads_to_events(ads: pd.DataFrame, tickets: pd.DataFrame,
         # venue address but not the event name). Hint matches bypass the marketing_skip filter
         # so an explicit caption like "San Jose coffee and r&b" still routes to San Jose Blend
         # even though San Jose is normally excluded from generic Blend attribution.
+        window_end = ad["date"] + pd.Timedelta(days=MAX_LOOKBACK_DAYS)
         target = None
         if name_hint is not None and pd.notna(name_hint) and isinstance(name_hint, str) and name_hint:
             hint_lower = name_hint.lower()
             same_series = ev[ev["series"] == series]
             matches = same_series[same_series["search_text"].str.contains(hint_lower, regex=False, na=False)]
             if not matches.empty:
-                # Prefer the next future event among matches; else most recent past
-                future = matches[matches["event_instance_date"] >= ad["date"]]
+                # Prefer the next future event within the lookback window; else most recent past
+                future = matches[(matches["event_instance_date"] >= ad["date"]) &
+                                 (matches["event_instance_date"] <= window_end)]
                 target = future.iloc[0] if not future.empty else matches.iloc[-1]
 
-        # 2. Default: next future event in series (skipping marketing_skip events)
+        # 2. Default: next future event in series within the lookback window
         if target is None:
             future = ev[(ev["series"] == series) &
                         (ev["event_instance_date"] >= ad["date"]) &
+                        (ev["event_instance_date"] <= window_end) &
                         (~ev["instance_key"].astype(str).isin(skip_keys))]
             if not future.empty:
                 target = future.iloc[0]
             else:
-                # 3. Fall back to most recent past event in series (still skipping flagged ones)
-                past = ev[(ev["series"] == series) &
-                          (~ev["instance_key"].astype(str).isin(skip_keys))]
-                if past.empty:
-                    continue
-                target = past.iloc[-1]
+                # No event within the window → this ad ran for a prior event not in the data. Skip.
+                continue
 
         rows.append({
             "campaign": ad["campaign"],
