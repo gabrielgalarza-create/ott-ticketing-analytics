@@ -215,6 +215,11 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
             continue
         forecast = r["forecast_final"] if pd.notna(r["forecast_final"]) else None
         on_track = forecast is not None and forecast >= target
+        cap = int(r["capacity"]) if pd.notna(r["capacity"]) else None
+        has_explicit_target = pd.notna(r["target_tickets"])
+
+        # Pace vs comparable past events — SAME signal as the Pipeline-health table
+        flag, pace_reason = pace_flag(r, comparable_curve(tickets, r))
 
         rec = recommended_daily_spend(r, marketing_table, target, days) or {}
         pace = current_pace(attributed_ads, ik, days=7)
@@ -222,37 +227,51 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
         cur_spend = pace.get("daily_spend", 0) or 0
         need_imp = rec.get("daily_impressions_needed", 0) or 0
         need_spend = rec.get("daily_spend_needed", 0) or 0
+        mult = (need_imp / cur_imp) if cur_imp > 0 else None
+        fc_txt = f"forecast ~{int(forecast):,}" if forecast is not None else "no forecast yet (first run)"
 
-        # Marketing efficiency for this event (impressions per ticket) vs series history
-        mt_row = marketing_table[marketing_table["instance_key"] == ik]
-        ipt = float(mt_row.iloc[0]["impressions_per_ticket"]) if not mt_row.empty and pd.notna(mt_row.iloc[0].get("impressions_per_ticket")) else None
-        hist_ipt = rec.get("median_impressions_per_ticket")
-
-        if on_track:
-            verdict, color = "✅ On track", "#16a34a"
-            action = f"Hold current pace. Forecast ~{int(forecast):,} vs {target:,} target."
-        else:
-            verdict, color = "🔴 Behind — action needed", "#dc2626"
-            fc_txt = f"forecast ~{int(forecast):,}" if forecast is not None else "no forecast yet"
-            # Decide the lever: under-investing in reach vs. conversion problem
-            mult = (need_imp / cur_imp) if cur_imp > 0 else None
+        # The "how to chase the target" clause — only when there's a real gap to close
+        def scale_clause():
             if cur_imp == 0:
-                action = (f"<b>No ads running.</b> Start paid now at <b>~${need_spend:,.0f}/day</b> "
-                          f"(~{need_imp:,} impressions/day) to close the gap to {target:,}.")
-            elif mult is not None and mult >= 1.5:
-                action = (f"<b>Under-investing in reach.</b> Scale paid spend to <b>~${need_spend:,.0f}/day</b> "
-                          f"(now ~${cur_spend:,.0f}/day) — about <b>{mult:.1f}× current</b> impressions. {fc_txt}.")
-            elif ipt is not None and hist_ipt is not None and ipt > hist_ipt * 1.3:
-                action = (f"<b>Reach is OK but conversion is weak</b> ({ipt:.0f} impressions/ticket vs "
-                          f"~{hist_ipt:.0f} historical). Don't just spend more — refresh creative & lean on the "
-                          f"proven formats below. {fc_txt}.")
+                return f"To chase the {target:,} {'target' if has_explicit_target else 'cap'}, start paid at <b>~${need_spend:,.0f}/day</b> (~{need_imp:,} impressions/day)."
+            if mult is not None and mult >= 1.2:
+                return f"To chase the {target:,} {'target' if has_explicit_target else 'cap'}, scale paid to <b>~${need_spend:,.0f}/day</b> (now ~${cur_spend:,.0f}/day, ~{mult:.1f}× current)."
+            return f"Current spend (~${cur_spend:,.0f}/day) is about right for the pace — keep posting to push toward {target:,}."
+
+        target_word = "target" if has_explicit_target else "venue cap"
+        if flag == "behind":
+            color, verdict = "#dc2626", "🔴 Behind pace — action needed"
+            action = f"Selling slower than past events ({pace_reason}). {fc_txt}. {scale_clause()}"
+        elif flag == "ahead":
+            if on_track:
+                color, verdict = "#16a34a", "✅ Ahead of pace · on track to beat goal"
+                action = f"Selling faster than past events ({pace_reason}). {fc_txt} — at/above the {target:,} {target_word}. Hold the pace."
             else:
-                action = (f"Lift marketing ~{mult:.1f}× to <b>~${need_spend:,.0f}/day</b> "
-                          f"({need_imp:,} impressions/day) and keep posting. {fc_txt}.")
+                color, verdict = "#2563eb", f"🔵 Ahead of pace · {target:,} {target_word} is a stretch"
+                action = f"Selling faster than past events ({pace_reason}), tracking to ~{int(forecast):,} of {target:,}. {scale_clause()}"
+        elif flag == "on_pace":
+            if on_track:
+                color, verdict = "#16a34a", "🟢 On pace · on track for goal"
+                action = f"Tracking with past events. {fc_txt} vs {target:,} {target_word}. Hold steady."
+            else:
+                color, verdict = "#d97706", f"🟡 On pace · short of {target:,} {target_word}"
+                action = f"Tracking with past events but {fc_txt} is under the goal. {scale_clause()}"
+        else:  # no_baseline — first run of this event, judge on forecast vs target only
+            if forecast is None:
+                color, verdict = "#6b7280", "⚪ Too early to call"
+                action = f"First run of this event — not enough history to gauge pace yet. {sold:,}/{target:,} sold."
+            elif on_track:
+                color, verdict = "#16a34a", "✅ On track for goal"
+                action = f"No comparable history, but {fc_txt} ≥ {target:,} {target_word}. Keep going."
+            else:
+                color, verdict = "#d97706", f"🟡 Forecast under {target:,} {target_word}"
+                action = f"No comparable history to judge pace. {fc_txt}. {scale_clause()}"
+
         date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
+        cap_txt = f" · {cap} cap" if cap and has_explicit_target else ""
         rec_cards.append(f"""
         <div class="rec-card" style="border-left:4px solid {color}">
-          <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str} · {days}d out · {sold:,}/{target:,} sold</span></div>
+          <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str} · {days}d out · {sold:,}/{target:,} {target_word}{cap_txt}</span></div>
           <div class="rec-verdict" style="color:{color}">{verdict}</div>
           <div class="rec-action">{action}</div>
         </div>""")
