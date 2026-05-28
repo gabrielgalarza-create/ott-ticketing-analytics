@@ -367,3 +367,24 @@ def current_pace(attributed: pd.DataFrame, instance_key: str, days: int = 7) -> 
         "daily_spend": float(daily["spend"].mean()),
         "n_days": len(daily),
     }
+
+
+def current_organic_pace(attributed_posts: pd.DataFrame, instance_key: str, days: int = 14) -> dict:
+    """Organic post views + post count per week for an event over the last N days."""
+    empty = {"weekly_views": 0, "posts": 0, "daily_views": 0}
+    if attributed_posts is None or attributed_posts.empty:
+        return empty
+    e = attributed_posts[attributed_posts["instance_key"].astype(str) == str(instance_key)].copy()
+    if e.empty:
+        return empty
+    cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days)
+    recent = e[e["date"] >= cutoff]
+    if recent.empty:
+        return {**empty, "posts": 0}
+    total_views = int(recent["views"].sum())
+    return {
+        "weekly_views": round(total_views / max(1, days) * 7),
+        "daily_views": round(total_views / max(1, days)),
+        "posts": int(len(recent)),
+        "posts_per_week": round(len(recent) / max(1, days) * 7, 1),
+    }
