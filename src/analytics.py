@@ -292,10 +292,12 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
             forecasts.append(fc.get("forecast"))
             forecast_lows.append(fc.get("low"))
             forecast_highs.append(fc.get("high"))
-            forecast_methods.append(
-                f"median of n={fc['n_comparables']} comparables in ${fc['price_band'][0]:.0f}-${fc['price_band'][1]:.0f} band"
-                if fc.get("forecast") is not None else fc.get("reason", "n/a")
-            )
+            if fc.get("forecast") is not None:
+                pb = fc.get("price_band")
+                band_lbl = (f"in ${pb[0]:.0f}-${pb[1]:.0f} band" if pb else "same-series")
+                forecast_methods.append(f"median of n={fc['n_comparables']} comparables {band_lbl}")
+            else:
+                forecast_methods.append(fc.get("reason", "n/a"))
             surge_shares.append(fc.get("surge_share"))
             surge_tix.append(fc.get("surge_tickets"))
     grouped["forecast_final"] = forecasts
@@ -412,6 +414,10 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
     current_sold + median(tickets_remaining). This works even when comparables hadn't started
     selling yet at this days-out — they simply contribute their full final as "remaining."
 
+    Crucially it also forecasts events that haven't started selling (waitlist/pre-sale, 0 sold):
+    series like The Blend launch slow and back-load most sales into the final weeks, so a 0-sold
+    Blend 23 days out still projects to ~its comparable Blends' finals via `tickets_remaining`.
+
     Returns {"forecast", "low", "high", "comparables": [...], "method"} or {"forecast": None, "reason"}.
     """
     if tickets.empty:
@@ -420,22 +426,21 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
     if pd.isna(days_out) or days_out < 0:
         return {"forecast": None, "reason": "event is past"}
     current_sold = int(event_row["tickets_sold"])
-    if current_sold == 0:
-        return {"forecast": None, "reason": "no tickets sold yet"}
 
     now = pd.Timestamp.now(tz="UTC")
     target_key = event_row["instance_key"]
     target_name = event_row.get("event_name", "")
-
-    # Mode price for this event
-    this_event = tickets[tickets["instance_key"] == target_key]
-    if this_event.empty:
-        return {"forecast": None, "reason": "no ticket data for this event"}
-    mode_prices = this_event[~this_event["is_free"]]["event_price_amount"]
-    if mode_prices.empty:
-        return {"forecast": None, "reason": "free events not forecastable"}
-    target_price = float(mode_prices.mode().iloc[0])
     target_tokens = _series_tokens(target_name)
+
+    # Mode price for this event — may be unknown for a 0-sold waitlist/pre-sale event. That's fine:
+    # we can still match comparables by series. Only when there's NEITHER a price NOR a recognizable
+    # series do we have no basis to forecast.
+    this_event = tickets[tickets["instance_key"] == target_key]
+    paid_prices = (this_event[~this_event["is_free"]]["event_price_amount"]
+                   if not this_event.empty else pd.Series(dtype=float))
+    target_price = float(paid_prices.mode().iloc[0]) if not paid_prices.empty else None
+    if target_price is None and not target_tokens:
+        return {"forecast": None, "reason": "no price or series to match comparables"}
 
     # Build comparables: past paid events, ≥min_final tickets, EITHER same-series OR price-band
     past = tickets[(tickets["event_instance_date"] < now) & (~tickets["is_free"])]
@@ -447,12 +452,17 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         sold=("id", "count"),
         mode_price=("event_price_amount", lambda s: s.mode().iloc[0]),
     ).reset_index()
-    lo, hi = target_price * (1 - price_band_pct), target_price * (1 + price_band_pct)
-    in_price_band = (meta["mode_price"] >= lo) & (meta["mode_price"] <= hi)
     same_series = meta["name"].apply(lambda n: bool(target_tokens & _series_tokens(n)))
+    if target_price is not None:
+        lo, hi = target_price * (1 - price_band_pct), target_price * (1 + price_band_pct)
+        in_price_band = (meta["mode_price"] >= lo) & (meta["mode_price"] <= hi)
+    else:
+        lo = hi = None
+        in_price_band = pd.Series(False, index=meta.index)
     eligible = meta[(in_price_band | same_series) & (meta["sold"] >= min_final)].copy()
     if eligible.empty:
-        return {"forecast": None, "reason": f"no past events in price band ${lo:.0f}-${hi:.0f} with ≥{min_final} tickets"}
+        band_txt = f"price band ${lo:.0f}-${hi:.0f}" if lo is not None else f"the '{target_name}' series"
+        return {"forecast": None, "reason": f"no past events in {band_txt} with ≥{min_final} tickets"}
     eligible["same_series"] = eligible["name"].apply(lambda n: bool(target_tokens & _series_tokens(n)))
 
     # For each comparable: tickets sold from days_out onward = final - cum_at_stage,
@@ -509,7 +519,7 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         "n_comparables": len(remaining_vals),
         "comparables": sorted(used, key=lambda c: (not c["same_series"], -c["final"])),
         "target_price": target_price,
-        "price_band": (round(lo, 0), round(hi, 0)),
+        "price_band": (round(lo, 0), round(hi, 0)) if lo is not None else None,
         "surge_share": round(surge_share, 3),
         "surge_tickets": surge_tickets,
         "surge_window_days": SURGE_WINDOW_DAYS,
