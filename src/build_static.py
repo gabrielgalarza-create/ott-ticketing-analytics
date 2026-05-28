@@ -307,28 +307,55 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
           {surge_html}
         </div>""")
 
-    # Proven content formats: top organic posts by views across all events
-    formats_html = ""
-    if not attributed_posts.empty:
-        top = attributed_posts.sort_values("views", ascending=False).head(4)
-        rows = ""
-        for _, p in top.iterrows():
-            ch = "IG" if p["channel"] == "instagram_organic" else "TikTok"
-            cap = (p["caption"][:90] + "…") if len(p["caption"]) > 90 else p["caption"]
-            cap = cap.replace("\n", " ")
-            link = f"<a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
-            rows += f"<li><b>{int(p['views']):,} views</b> · {ch} · @{p.get('owner','')} — {cap} {link}</li>"
-        formats_html = f"""
-        <div class="rec-card" style="border-left:4px solid #6366f1">
-          <div class="rec-head">📈 Proven content formats (your highest-reach posts — make more like these)</div>
-          <ul class="rec-list">{rows}</ul>
-        </div>"""
+    # Content to try this week: for each upcoming event, the posts that worked best for THAT
+    # event's series (its own past instances), so suggestions are event-specific rather than a
+    # single global highest-reach list.
+    def _post_li(p):
+        ch = "IG" if p["channel"] == "instagram_organic" else "TikTok"
+        cap = (p["caption"][:90] + "…") if len(p["caption"]) > 90 else p["caption"]
+        cap = cap.replace("\n", " ")
+        link = f"<a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
+        return f"<li><b>{int(p['views']):,} views</b> · {ch} · @{p.get('owner','')} — {cap} {link}</li>"
 
-    if not rec_cards and not formats_html:
+    content_cards = []
+    if not attributed_posts.empty:
+        ap = attributed_posts.copy()
+        if "is_ambiguous" in ap.columns:
+            ap = ap[ap["is_ambiguous"] != True]  # don't suggest posts still pending review
+        for _, r in upcoming.sort_values("event_instance_date").iterrows():
+            ik = str(r["instance_key"])
+            series = _event_series(r["event_name"])
+            same = ap[ap["instance_key"].astype(str) == ik]
+            if series:
+                same = pd.concat([same, ap[ap["series"] == series]]).drop_duplicates(subset=["post_id"])
+            same = same.sort_values("views", ascending=False).head(3)
+            date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
+            if not same.empty:
+                rows = "".join(_post_li(p) for _, p in same.iterrows())
+                hint = "What's worked for this event before — make more like these:"
+            else:
+                # First-ever event of its kind: fall back to top formats across all events
+                fb = ap.sort_values("views", ascending=False).head(3)
+                if fb.empty:
+                    continue
+                rows = "".join(_post_li(p) for _, p in fb.iterrows())
+                hint = "No past content for this event yet — top formats across all events:"
+            content_cards.append(f"""
+        <div class="rec-card" style="border-left:4px solid #6366f1">
+          <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str}</span></div>
+          <div class="rec-action">{hint}</div>
+          <ul class="rec-list">{rows}</ul>
+        </div>""")
+
+    if not rec_cards and not content_cards:
         return ""
-    return f"""
-    <h2 style="margin-top:0">🎯 What to dial up now</h2>
-    <div class="rec-grid">{''.join(rec_cards)}{formats_html}</div>"""
+    out = '<h2 style="margin-top:0">🎯 What to dial up now</h2>'
+    if rec_cards:
+        out += f'<div class="rec-grid">{"".join(rec_cards)}</div>'
+    if content_cards:
+        out += '<h2>📸 Try these types of content over the next week</h2>'
+        out += f'<div class="rec-grid">{"".join(content_cards)}</div>'
+    return out
 
 
 def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) -> str:
