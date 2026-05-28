@@ -198,7 +198,7 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
                                  tickets: pd.DataFrame) -> str:
     """Top-of-dashboard 'what lever to pull' recommendation for each behind-pace upcoming event,
     plus the proven content formats worth replicating."""
-    from src.marketing import current_pace, recommended_daily_spend
+    from src.marketing import current_organic_pace, current_pace, recommended_daily_spend, _event_series
 
     upcoming = summary[summary["status"] != "past"].copy()
     if upcoming.empty:
@@ -267,6 +267,35 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
                 color, verdict = "#d97706", f"🟡 Forecast under {target:,} {target_word}"
                 action = f"No comparable history to judge pace. {fc_txt}. {scale_clause()}"
 
+        # Channel breakdown: current paid vs organic reach + where to dial up
+        org = current_organic_pace(attributed_posts, ik, days=14)
+        org_daily = org.get("daily_views", 0) or 0
+        org_posts_wk = org.get("posts_per_week", 0) or 0
+        paid_part = (f"<b>Paid:</b> ~{cur_imp:,.0f} impressions/day (${cur_spend:,.0f}/day)"
+                     if cur_imp else "<b>Paid:</b> none running")
+        org_part = (f"<b>Organic:</b> ~{org_daily:,.0f} views/day, {org_posts_wk:g} posts/wk"
+                    if org_daily else "<b>Organic:</b> no recent posts attributed")
+        # Dial-up guidance per channel
+        dial = []
+        if flag == "behind" or (not on_track and flag in ("on_pace", "no_baseline", "ahead")):
+            if cur_imp == 0:
+                dial.append("turn paid <b>on</b>")
+            elif mult is not None and mult >= 1.2:
+                dial.append(f"raise <b>paid</b> ~{mult:.1f}× → ${need_spend:,.0f}/day")
+            if org_posts_wk < 3:
+                dial.append("post <b>organic more often</b> (aim ~3–5×/wk)")
+        dial_txt = (" &nbsp;→ Dial up: " + ", ".join(dial)) if dial else ""
+        channel_html = f"<div class='rec-channels'>{paid_part} &nbsp;·&nbsp; {org_part}{dial_txt}</div>"
+
+        # Week-of surge line
+        surge_share = r.get("surge_share")
+        surge_tix = r.get("surge_tickets")
+        surge_html = ""
+        if pd.notna(surge_share) and surge_share and surge_share > 0 and forecast is not None:
+            surge_html = (f"<div class='rec-surge'>📈 Forecast includes the week-of surge: historically "
+                          f"~{surge_share*100:.0f}% of sales land in the final 7 days "
+                          f"(~{int(surge_tix):,} of the forecast) — peak spend + posting that week.</div>")
+
         date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
         cap_txt = f" · {cap} cap" if cap and has_explicit_target else ""
         rec_cards.append(f"""
@@ -274,6 +303,8 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
           <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str} · {days}d out · {sold:,}/{target:,} {target_word}{cap_txt}</span></div>
           <div class="rec-verdict" style="color:{color}">{verdict}</div>
           <div class="rec-action">{action}</div>
+          {channel_html}
+          {surge_html}
         </div>""")
 
     # Proven content formats: top organic posts by views across all events
@@ -916,6 +947,10 @@ def render() -> str:
                 f"Forecast pace lands at ~{int(r['forecast_final'])} ({int(r['forecast_low'])}–{int(r['forecast_high'])})"
                 if pd.notna(r["forecast_final"]) else "no forecast yet (need comparable past events)"
             )
+            surge_share = r.get("surge_share")
+            if pd.notna(r["forecast_final"]) and pd.notna(surge_share) and surge_share and surge_share > 0:
+                forecast_text += (f" — incl. a typical <b>final-week surge of ~{surge_share*100:.0f}%</b> "
+                                  f"(~{int(r['surge_tickets']):,} tickets in the last 7 days)")
             if target:
                 forecast_ok = pd.notna(r["forecast_final"]) and r["forecast_final"] >= target
                 verdict = ("✅ on track to hit target" if forecast_ok
@@ -1092,6 +1127,10 @@ def render() -> str:
   .rec-head {{ font-weight: 700; font-size: 14px; color: #0f172a; margin-bottom: 6px; }}
   .rec-verdict {{ font-weight: 700; font-size: 13px; margin-bottom: 6px; }}
   .rec-action {{ font-size: 13px; color: #334155; line-height: 1.5; }}
+  .rec-channels {{ font-size: 12px; color: #475569; margin-top: 8px; padding-top: 8px;
+                   border-top: 1px dashed #e2e8f0; }}
+  .rec-surge {{ font-size: 12px; color: #92400e; background: #fffbeb; border-radius: 6px;
+                padding: 7px 9px; margin-top: 8px; }}
   .rec-list {{ margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: #334155; line-height: 1.6; }}
   @media (max-width: 820px) {{ .rec-grid {{ grid-template-columns: 1fr; }} }}
   code.ik {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;

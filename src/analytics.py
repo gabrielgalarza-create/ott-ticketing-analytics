@@ -52,6 +52,7 @@ def load_tickets() -> pd.DataFrame:
 DEFAULT_PAID_SHOW_UP_RATE = 0.75   # 70–80%, midpoint 75%
 DEFAULT_FREE_SHOW_UP_RATE = 0.45   # 40–50%, midpoint 45%
 MIN_SAMPLE_FOR_SERIES_RATE = 100   # need ≥100 tickets across past instances of a series before we trust its own rate
+SURGE_WINDOW_DAYS = 7              # "week-of surge" window — final-N-days share of ticket sales
 
 
 def show_up_rates(tickets: pd.DataFrame) -> dict[str, float]:
@@ -278,12 +279,14 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
 
     # Forecast final ticket sales (only for upcoming events)
     forecasts, forecast_lows, forecast_highs, forecast_methods = [], [], [], []
+    surge_shares, surge_tix = [], []
     for _, r in grouped.iterrows():
         if r["status"] == "past":
             forecasts.append(int(r["tickets_sold"]))
             forecast_lows.append(int(r["tickets_sold"]))
             forecast_highs.append(int(r["tickets_sold"]))
             forecast_methods.append("actual")
+            surge_shares.append(None); surge_tix.append(None)
         else:
             fc = forecast_final_tickets(tickets, r)
             forecasts.append(fc.get("forecast"))
@@ -293,10 +296,14 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
                 f"median of n={fc['n_comparables']} comparables in ${fc['price_band'][0]:.0f}-${fc['price_band'][1]:.0f} band"
                 if fc.get("forecast") is not None else fc.get("reason", "n/a")
             )
+            surge_shares.append(fc.get("surge_share"))
+            surge_tix.append(fc.get("surge_tickets"))
     grouped["forecast_final"] = forecasts
     grouped["forecast_low"] = forecast_lows
     grouped["forecast_high"] = forecast_highs
     grouped["forecast_method"] = forecast_methods
+    grouped["surge_share"] = surge_shares
+    grouped["surge_tickets"] = surge_tix
 
     return grouped.sort_values("event_instance_date")
 
@@ -448,8 +455,10 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         return {"forecast": None, "reason": f"no past events in price band ${lo:.0f}-${hi:.0f} with ≥{min_final} tickets"}
     eligible["same_series"] = eligible["name"].apply(lambda n: bool(target_tokens & _series_tokens(n)))
 
-    # For each comparable: tickets sold from days_out onward = final - cum_at_stage
+    # For each comparable: tickets sold from days_out onward = final - cum_at_stage,
+    # plus the share of final sold in the last SURGE_WINDOW_DAYS (the week-of surge).
     remaining_vals = []
+    surge_shares = []
     used = []
     for _, c in eligible.iterrows():
         curve = sales_curve(tickets, c["instance_key"])
@@ -462,6 +471,10 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         cum_at_stage = int(at_stage["tickets_cum"].max()) if not at_stage.empty else 0
         remaining = final - cum_at_stage
         remaining_vals.append(remaining)
+        # Final-week surge: tickets sold in the last SURGE_WINDOW_DAYS / final
+        at_surge = curve[curve["days_before_event"] >= SURGE_WINDOW_DAYS]
+        cum_at_surge = int(at_surge["tickets_cum"].max()) if not at_surge.empty else 0
+        surge_shares.append((final - cum_at_surge) / final)
         used.append({
             "name": c["name"], "date": c["date"], "final": final,
             "mode_price": float(c["mode_price"]),
@@ -480,9 +493,16 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
     n = len(remaining_sorted)
     p25 = remaining_sorted[max(0, n // 4)]
     p75 = remaining_sorted[min(n - 1, (3 * n) // 4)]
+    forecast = int(current_sold + median_remaining)
+
+    # Week-of surge: historically what % of an event's final sales land in the last week.
+    surge_share = statistics.median(surge_shares) if surge_shares else 0.0
+    # If this event is still BEFORE its final week, that surge is still ahead of it.
+    surge_ahead = days_out > SURGE_WINDOW_DAYS
+    surge_tickets = int(round(forecast * surge_share)) if surge_ahead else 0
 
     return {
-        "forecast": int(current_sold + median_remaining),
+        "forecast": forecast,
         "low": int(current_sold + p25),
         "high": int(current_sold + p75),
         "median_remaining": int(median_remaining),
@@ -490,6 +510,10 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         "comparables": sorted(used, key=lambda c: (not c["same_series"], -c["final"])),
         "target_price": target_price,
         "price_band": (round(lo, 0), round(hi, 0)),
+        "surge_share": round(surge_share, 3),
+        "surge_tickets": surge_tickets,
+        "surge_window_days": SURGE_WINDOW_DAYS,
+        "surge_ahead": bool(surge_ahead),
     }
 
 
