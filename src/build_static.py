@@ -115,30 +115,20 @@ def build_marketing_block(event_row: pd.Series, marketing_table: pd.DataFrame,
     daily_spend_need = rec.get("daily_spend_needed", 0) or 0
     multiplier = (daily_imp_need / daily_imp_now) if daily_imp_now > 0 else None
 
-    verdict = ""
+    cpa = r["cpa"]
+    cpa_txt = f" · ${cpa:.2f}/ticket" + (" (great)" if pd.notna(cpa) and cpa < (rec.get("median_cpa") or 99) else "") if pd.notna(cpa) else ""
+
     if multiplier is None:
-        verdict = "⚠️ No current ad activity — need to start spending now."
+        headline = f"🔴 <b>No ads running</b> — start paid at ~${daily_spend_need:,.0f}/day to chase {target:,}."
     elif multiplier <= 1.1:
-        verdict = "✅ Current marketing pace matches what's needed to hit target."
-    elif multiplier <= 2:
-        verdict = f"⚠️ Need to roughly DOUBLE current marketing pace ({multiplier:.1f}× current)."
+        headline = f"✅ <b>Paid pace is on track</b> — hold ~${daily_spend_now:,.0f}/day."
     else:
-        verdict = f"🔴 Need to {multiplier:.1f}× current marketing pace to hit target."
+        headline = (f"🔴 <b>Scale paid ~{multiplier:.1f}× → ${daily_spend_need:,.0f}/day</b> "
+                    f"(now ~${daily_spend_now:,.0f}/day) to chase {target:,}.")
 
     return f"""
-    <h4>Marketing spend status (FB ads)</h4>
-    <table class="scenarios">
-      <thead><tr><th>Metric</th><th>So far</th><th>Recent pace (last 7d)</th><th>Needed pace</th></tr></thead>
-      <tbody>
-        <tr><td>Impressions</td><td class='num'>{total_imp:,}</td><td class='num'>{daily_imp_now:,.0f}/day</td><td class='num'><b>{daily_imp_need:,}/day</b></td></tr>
-        <tr><td>Spend</td><td class='num'>${total_spend:,.0f}</td><td class='num'>${daily_spend_now:,.0f}/day</td><td class='num'><b>${daily_spend_need:,.0f}/day</b></td></tr>
-        <tr><td>Tickets sold</td><td class='num'>{int(r['tickets_sold']):,}</td><td class='num'>—</td><td class='num'>target {target:,}</td></tr>
-        <tr><td>CPA so far</td><td class='num'>${r['cpa']:.2f}</td><td class='num'>—</td><td class='num'>historical median ${rec.get('median_cpa', 0):.2f}</td></tr>
-        <tr><td>Impressions/ticket</td><td class='num'>{r['impressions_per_ticket']:.0f}</td><td class='num'>—</td><td class='num'>historical median {rec.get('median_impressions_per_ticket', 0):.0f}</td></tr>
-      </tbody>
-    </table>
-    <p><b>{verdict}</b></p>
-    <p class="caption">Recommended pace is anchored to past <b>same-series</b> events ({rec.get('past_events_used', 0)} comparable used). Total needed to close the gap: <b>{rec.get('total_impressions_needed', 0):,} impressions</b> at <b>${rec.get('total_spend_needed', 0):,.0f}</b> over {days} days.</p>
+    <p class="mkt-line">{headline}</p>
+    <p class="caption">Spent ${total_spend:,.0f} so far{cpa_txt}. Closing the gap needs ~${rec.get('total_spend_needed', 0):,.0f} more over {days} days (vs ~{rec.get('median_impressions_per_ticket', 0):.0f} impressions/ticket historically).</p>
     """
 
 
@@ -1158,6 +1148,7 @@ def render() -> str:
                    border-top: 1px dashed #e2e8f0; }}
   .rec-surge {{ font-size: 12px; color: #92400e; background: #fffbeb; border-radius: 6px;
                 padding: 7px 9px; margin-top: 8px; }}
+  .mkt-line {{ font-size: 14px; margin: 10px 0 2px; }}
   .rec-list {{ margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: #334155; line-height: 1.6; }}
   @media (max-width: 820px) {{ .rec-grid {{ grid-template-columns: 1fr; }} }}
   code.ik {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
