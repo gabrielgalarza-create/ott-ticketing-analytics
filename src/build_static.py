@@ -859,14 +859,20 @@ def build_event_curve(tickets: pd.DataFrame, row: pd.Series,
         goal = float(row["target_tickets"])
     elif pd.notna(row.get("capacity")) and row["capacity"] > 0:
         goal = float(row["capacity"])
-    launch_days = float(curve["days_before_event"].max())
-    if goal and launch_days > 0:
-        fig.add_trace(go.Scatter(
-            x=[launch_days, 0], y=[0, goal],
-            mode="lines", name=f"Goal pace → {int(goal)} by event day",
-            line=dict(color="rgba(99,102,241,0.28)", width=2, dash="dot"),
-            hovertemplate="Goal pace: %{y:.0f}<extra></extra>",
-        ))
+    if goal:
+        # Launch = first day with meaningful sales, not a stray comp/test ticket sold weeks
+        # before the real on-sale. Threshold = max(3, 1% of goal); fall back to curve.max()
+        # if the event hasn't crossed it yet.
+        threshold = max(3, int(0.01 * goal))
+        active = curve[curve["tickets_cum"] >= threshold]
+        launch_days = float(active["days_before_event"].max()) if not active.empty else float(curve["days_before_event"].max())
+        if launch_days > 0:
+            fig.add_trace(go.Scatter(
+                x=[launch_days, 0], y=[0, goal],
+                mode="lines", name=f"Goal pace → {int(goal)} by event day",
+                line=dict(color="rgba(99,102,241,0.28)", width=2, dash="dot"),
+                hovertemplate="Goal pace: %{y:.0f}<extra></extra>",
+            ))
 
     # 2) Average of comparables (kept for quick reference)
     comp_avg = comparable_curve(tickets, row)
