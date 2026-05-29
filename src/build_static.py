@@ -7,6 +7,7 @@ Run: python -m src.build_static
 """
 from __future__ import annotations
 
+import colorsys
 import sys
 from pathlib import Path
 
@@ -54,6 +55,33 @@ def money(v) -> str:
 def _chart(fig: go.Figure, first: bool = False) -> str:
     return pio.to_html(fig, include_plotlyjs=False, full_html=False,
                        config={"displayModeBar": False})
+
+
+THIS_EVENT_COLOR = "#6366f1"
+_GOLDEN_ANGLE = 137.508  # spreads hues so adjacent indices land far apart on the wheel
+
+
+def _hsl_hex(hue: float, sat: float, light: float) -> str:
+    r, g, b = colorsys.hls_to_rgb((hue % 360) / 360, light, sat)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+
+def build_event_color_map(tickets: pd.DataFrame) -> dict[str, float]:
+    """Assign each event instance a stable, distinct hue (0-360).
+
+    Golden-angle spacing over a stable key order guarantees adjacent events get
+    well-separated colors, and the same instance keeps its color across every chart.
+    The ~30° band around indigo (this-event blue) is skipped so comparables never
+    blend into the bold 'This event' line.
+    """
+    keys = sorted(str(k) for k in tickets["instance_key"].dropna().unique())
+    cmap: dict[str, float] = {}
+    for i, k in enumerate(keys):
+        hue = (15 + i * _GOLDEN_ANGLE) % 360
+        if 225 <= hue <= 255:  # avoid the indigo reserved for 'This event'
+            hue = (hue + 40) % 360
+        cmap[k] = hue
+    return cmap
 
 
 def build_velocity_chart(tickets: pd.DataFrame) -> str:
@@ -194,7 +222,7 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
     if upcoming.empty:
         return ""
 
-    rec_cards = []
+    rec_rows = []
     for _, r in upcoming.sort_values("event_instance_date").iterrows():
         ik = str(r["instance_key"])
         days = int(r["days_until_event"]) if pd.notna(r["days_until_event"]) else 0
@@ -277,37 +305,85 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
         dial_txt = (" &nbsp;→ Dial up: " + ", ".join(dial)) if dial else ""
         channel_html = f"<div class='rec-channels'>{paid_part} &nbsp;·&nbsp; {org_part}{dial_txt}</div>"
 
-        # Week-of surge line
+        # Week-of surge line (compact)
         surge_share = r.get("surge_share")
         surge_tix = r.get("surge_tickets")
-        surge_html = ""
+        surge_note = ""
         if pd.notna(surge_share) and surge_share and surge_share > 0 and forecast is not None:
-            surge_html = (f"<div class='rec-surge'>📈 Forecast includes the week-of surge: historically "
-                          f"~{surge_share*100:.0f}% of sales land in the final 7 days "
-                          f"(~{int(surge_tix):,} of the forecast) — peak spend + posting that week.</div>")
+            surge_note = (f"<div class='rec-surge-note'>📈 ~{surge_share*100:.0f}% of sales hit "
+                          f"the final 7 days (~{int(surge_tix):,}) — peak then.</div>")
+
+        # ---- Compact, table-ready cells ----
+        # Short colored pace badge
+        if flag == "behind":
+            status = "Behind"
+        elif flag == "ahead":
+            status = "Ahead" if on_track else "Ahead · stretch"
+        elif flag == "on_pace":
+            status = "On pace" if on_track else "On pace · short"
+        else:
+            status = "Too early" if forecast is None else ("On track" if on_track else "Under goal")
+
+        # Sold → forecast / goal
+        if forecast is None:
+            fc_part = "<span class='subnum'>—</span>"
+        else:
+            fc_color = "#16a34a" if on_track else "#dc2626"
+            fc_part = f"<b style='color:{fc_color}'>~{int(forecast):,}</b>"
+        goal_extra = f" <span class='subnum'>(cap {cap})</span>" if (has_explicit_target and cap) else ""
+        prog_cell = f"{sold:,} → {fc_part} / {target:,}{goal_extra}"
+
+        # Paid spend cell
+        if cur_spend == 0 and not on_track and need_spend:
+            paid_cell = f"<b>off</b> → ${need_spend:,.0f}"
+        elif not on_track and mult is not None and mult >= 1.2:
+            paid_cell = f"${cur_spend:,.0f} → <b>${need_spend:,.0f}</b> <span class='subnum'>{mult:.1f}×</span>"
+        elif cur_spend:
+            paid_cell = f"${cur_spend:,.0f} <span class='subnum'>✓</span>"
+        else:
+            paid_cell = "<span class='subnum'>none</span>"
+
+        # Organic cell
+        org_cell = (f"{org_daily:,.0f}/day <span class='subnum'>· {org_posts_wk:g}/wk</span>"
+                    if org_daily else "<span class='subnum'>none</span>")
+
+        # Concise recommendation
+        if forecast is None and flag == "no_baseline":
+            rec_short = "Too early — watch pace."
+        elif dial:
+            joined = "; ".join(dial)
+            rec_short = joined[0].upper() + joined[1:] if joined else joined
+        elif flag == "ahead" and on_track:
+            rec_short = "Hold pace, keep posting."
+        elif on_track:
+            rec_short = "On track — hold steady."
+        else:
+            rec_short = "Keep posting."
 
         date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
-        cap_txt = f" · {cap} cap" if cap and has_explicit_target else ""
-        rec_cards.append(f"""
-        <div class="rec-card" style="border-left:4px solid {color}">
-          <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str} · {days}d out · {sold:,}/{target:,} {target_word}{cap_txt}</span></div>
-          <div class="rec-verdict" style="color:{color}">{verdict}</div>
-          <div class="rec-action">{action}</div>
-          {channel_html}
-          {surge_html}
-        </div>""")
+        rec_rows.append(f"""
+        <tr>
+          <td class="ev-name" style="border-left:4px solid {color}">{r['event_name']}<span class="rec-sub">{date_str} · {days}d out</span></td>
+          <td style="color:{color};font-weight:700;white-space:nowrap">{status}</td>
+          <td class="num" style="white-space:nowrap">{prog_cell}</td>
+          <td class="num" style="white-space:nowrap">{paid_cell}</td>
+          <td class="num" style="white-space:nowrap">{org_cell}</td>
+          <td class="rec-do">{rec_short}{surge_note}</td>
+        </tr>""")
 
     # Content to try this week: for each upcoming event, the posts that worked best for THAT
     # event's series (its own past instances), so suggestions are event-specific rather than a
-    # single global highest-reach list.
-    def _post_li(p):
+    # single global highest-reach list. Rendered as compact table rows grouped per event.
+    def _post_cells(p):
         ch = "IG" if p["channel"] == "instagram_organic" else "TikTok"
-        cap = (p["caption"][:90] + "…") if len(p["caption"]) > 90 else p["caption"]
+        cap = (p["caption"][:70] + "…") if len(p["caption"]) > 70 else p["caption"]
         cap = cap.replace("\n", " ")
-        link = f"<a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
-        return f"<li><b>{int(p['views']):,} views</b> · {ch} · @{p.get('owner','')} — {cap} {link}</li>"
+        link = f" <a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
+        return (f"<td class='num' style='white-space:nowrap'>{int(p['views']):,}</td>"
+                f"<td style='white-space:nowrap'>{ch}</td>"
+                f"<td class='post-caption'>@{p.get('owner','')} — {cap}{link}</td>")
 
-    content_cards = []
+    content_rows = []
     if not attributed_posts.empty:
         ap = attributed_posts.copy()
         if "is_ambiguous" in ap.columns:
@@ -321,30 +397,37 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
             same = same.sort_values("views", ascending=False).head(3)
             date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
             if not same.empty:
-                rows = "".join(_post_li(p) for _, p in same.iterrows())
-                hint = "What's worked for this event before — make more like these:"
+                posts = list(same.iterrows())
+                note = ""
             else:
                 # First-ever event of its kind: fall back to top formats across all events
                 fb = ap.sort_values("views", ascending=False).head(3)
                 if fb.empty:
                     continue
-                rows = "".join(_post_li(p) for _, p in fb.iterrows())
-                hint = "No past content for this event yet — top formats across all events:"
-            content_cards.append(f"""
-        <div class="rec-card" style="border-left:4px solid #6366f1">
-          <div class="rec-head">{r['event_name']} <span class="subnum">· {date_str}</span></div>
-          <div class="rec-action">{hint}</div>
-          <ul class="rec-list">{rows}</ul>
-        </div>""")
+                posts = list(fb.iterrows())
+                note = "<span class='rec-sub'>top across all events</span>"
+            for i, (_, p) in enumerate(posts):
+                ev_cell = (f"<td class='ev-name' rowspan='{len(posts)}' style='border-left:4px solid #6366f1'>"
+                           f"{r['event_name']}<span class='rec-sub'>{date_str}</span>{note}</td>") if i == 0 else ""
+                content_rows.append(f"<tr>{ev_cell}{_post_cells(p)}</tr>")
 
-    if not rec_cards and not content_cards:
+    if not rec_rows and not content_rows:
         return ""
     out = '<h2 style="margin-top:0">🎯 What to dial up now</h2>'
-    if rec_cards:
-        out += f'<div class="rec-grid">{"".join(rec_cards)}</div>'
-    if content_cards:
+    if rec_rows:
+        out += f"""<table class="rec-table">
+          <thead><tr>
+            <th>Event</th><th>Pace</th><th>Sold → Forecast / Goal</th>
+            <th>Paid / day</th><th>Organic</th><th>Dial up</th>
+          </tr></thead>
+          <tbody>{"".join(rec_rows)}</tbody>
+        </table>"""
+    if content_rows:
         out += '<h2>📸 Try these types of content over the next week</h2>'
-        out += f'<div class="rec-grid">{"".join(content_cards)}</div>'
+        out += f"""<table class="rec-table">
+          <thead><tr><th>Event</th><th class="num">Views</th><th>Ch</th><th>Top content that worked</th></tr></thead>
+          <tbody>{"".join(content_rows)}</tbody>
+        </table>"""
     return out
 
 
@@ -537,7 +620,7 @@ def build_top_posts_block(attributed_posts: pd.DataFrame, instance_key: str, n: 
 
 def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFrame) -> str:
     """Cumulative impressions per event by days-before-event. Each event = its own
-    toggleable trace; same-series matches for any upcoming event are visible by default."""
+    toggleable trace; only the latest event is visible by default, the rest start as legendonly."""
     if attributed_ads.empty or tickets.empty:
         return "<p class='empty'>No ad data to plot.</p>"
 
@@ -581,6 +664,8 @@ def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFra
                               (~events_meta["is_same_series"]).map({True: 1, False: 0}) * 100_000 + \
                               events_meta["event_instance_date"].astype("int64") // -10**14
     events_meta = events_meta.sort_values("sort_key")
+    # Only the latest event (by date) is shown by default; everything else is legendonly.
+    latest_key = events_meta.loc[events_meta["event_instance_date"].idxmax(), "instance_key"]
 
     for _, e in events_meta.iterrows():
         sub = agg[agg["instance_key"] == e["instance_key"]].sort_values("days_before_event", ascending=False)
@@ -588,17 +673,15 @@ def build_marketing_pace_chart(tickets: pd.DataFrame, attributed_ads: pd.DataFra
             continue
         sub["impressions_cum"] = sub["impressions"].cumsum()
         date_str = pd.to_datetime(e["event_instance_date"]).strftime("%b %-d, %Y")
+        visibility = True if e["instance_key"] == latest_key else "legendonly"
         if e["is_upcoming"]:
             color = UPCOMING_COLORS[upcoming_idx % len(UPCOMING_COLORS)]; upcoming_idx += 1
-            visibility = True
             label = f"⏳ <b>{e['event_name']} ({date_str})</b>"
         elif e["is_same_series"]:
             color = SAME_SERIES_COLORS[same_idx % len(SAME_SERIES_COLORS)]; same_idx += 1
-            visibility = True
             label = f"⭐ {e['event_name']} ({date_str})"
         else:
             color = OTHER_COLORS[other_idx % len(OTHER_COLORS)]; other_idx += 1
-            visibility = "legendonly"
             label = f"{e['event_name']} ({date_str})"
         fig.add_trace(go.Scatter(
             x=sub["days_before_event"], y=sub["impressions_cum"],
@@ -751,12 +834,14 @@ def build_marketing_efficiency_table(marketing_table: pd.DataFrame) -> str:
     </table>"""
 
 
-def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
+def build_event_curve(tickets: pd.DataFrame, row: pd.Series,
+                      event_colors: dict[str, float] | None = None) -> str:
     """Per-event sales-pace chart. Renders each individual past comparable as its own trace
     so the user can click legend entries to toggle them on/off."""
     curve = sales_curve(tickets, row["instance_key"])
     if curve.empty:
         return ""
+    event_colors = event_colors or {}
 
     fig = go.Figure()
 
@@ -764,8 +849,24 @@ def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
     fig.add_trace(go.Scatter(
         x=curve["days_before_event"], y=curve["tickets_cum"],
         mode="lines+markers", name=f"<b>This event ({row['event_name']})</b>",
-        line=dict(width=3, color="#6366f1"),
+        line=dict(width=3, color=THIS_EVENT_COLOR),
     ))
+
+    # 1b) Goal pace — straight line from launch (0 sold) to event day (goal). Same hue as
+    # this event but faint, so it reads as a "where we need to be" reference, not real sales.
+    goal = None
+    if pd.notna(row.get("target_tickets")) and row["target_tickets"] > 0:
+        goal = float(row["target_tickets"])
+    elif pd.notna(row.get("capacity")) and row["capacity"] > 0:
+        goal = float(row["capacity"])
+    launch_days = float(curve["days_before_event"].max())
+    if goal and launch_days > 0:
+        fig.add_trace(go.Scatter(
+            x=[launch_days, 0], y=[0, goal],
+            mode="lines", name=f"Goal pace → {int(goal)} by event day",
+            line=dict(color="rgba(99,102,241,0.28)", width=2, dash="dot"),
+            hovertemplate="Goal pace: %{y:.0f}<extra></extra>",
+        ))
 
     # 2) Average of comparables (kept for quick reference)
     comp_avg = comparable_curve(tickets, row)
@@ -782,13 +883,9 @@ def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
     fc = forecast_final_tickets(tickets, row)
     comparables = fc.get("comparables") or []
 
-    # Color palette: distinctive for same-series, muted gray-tones for the rest
-    SAME_SERIES_COLORS = ["#dc2626", "#ea580c", "#d97706", "#16a34a"]
-    OTHER_COLORS = ["#64748b", "#94a3b8", "#475569", "#334155", "#7c3aed", "#0891b2",
-                    "#be185d", "#a16207", "#15803d", "#1d4ed8"]
-    same_idx = 0
-    other_idx = 0
-
+    # Each event gets its own stable, distinct hue (see build_event_color_map). Same-series
+    # comparables render saturated and visible; the rest are lighter and hidden until toggled.
+    fallback_idx = 0
     for c in comparables:
         # Need to look up the instance_key for this comparable from the tickets DF
         match = tickets[
@@ -797,19 +894,22 @@ def build_event_curve(tickets: pd.DataFrame, row: pd.Series) -> str:
         ]
         if match.empty:
             continue
-        ikey = match["instance_key"].iloc[0]
+        ikey = str(match["instance_key"].iloc[0])
         past_curve = sales_curve(tickets, ikey)
         if past_curve.empty:
             continue
 
+        hue = event_colors.get(ikey)
+        if hue is None:
+            hue = (15 + fallback_idx * _GOLDEN_ANGLE) % 360
+            fallback_idx += 1
+
         if c["same_series"]:
-            color = SAME_SERIES_COLORS[same_idx % len(SAME_SERIES_COLORS)]
-            same_idx += 1
+            color = _hsl_hex(hue, 0.68, 0.46)
             # Same-series events visible by default — they're the most relevant
             visibility = True
         else:
-            color = OTHER_COLORS[other_idx % len(OTHER_COLORS)]
-            other_idx += 1
+            color = _hsl_hex(hue, 0.42, 0.62)
             visibility = "legendonly"  # hidden until user clicks to show
 
         date_str = c["date"].strftime("%b %-d, %Y")
@@ -997,7 +1097,7 @@ def render() -> str:
               <thead><tr><th>Past event</th><th>Date</th><th>Price</th><th>Final</th><th>Sold by T-{days}d</th><th>Remaining from this stage</th></tr></thead>
               <tbody>{comp_rows}</tbody>
             </table>
-            <p class="caption">⭐ = same series. Forecast = current sold ({sold:,}) + median remaining from these comparables ({fc_detail.get('median_remaining', 0):,}) = {fc_detail.get('forecast', 0):,}.</p>"""
+            {(f'<p class="caption">⭐ = same series. Not on sale yet — forecast = median final of these recent comparables = {fc_detail.get("forecast", 0):,} (these events also launched slow and back-loaded most sales into the final weeks).</p>' if fc_detail.get("basis") == "recent-finals" else f'<p class="caption">⭐ = same series. Forecast = current sold ({sold:,}) + median remaining from these comparables ({fc_detail.get("median_remaining", 0):,}) = {fc_detail.get("forecast", 0):,}.</p>')}"""
         else:
             att = f"{r['attendance_rate_pct']:.0f}% showed up" if pd.notna(r["attendance_rate_pct"]) else ""
             body = f"<p>Final: <b>{sold:,}</b> tickets · {int(r['attended_count'])} attended · {att} · {money(r['net_revenue'])} revenue</p>"
@@ -1036,9 +1136,10 @@ def render() -> str:
         target_trackers_html = ""
 
     # ---- Per-event curves ----
+    event_colors = build_event_color_map(tickets)
     curves_html = ""
     for _, r in upcoming.sort_values("event_instance_date").iterrows():
-        c = build_event_curve(tickets, r)
+        c = build_event_curve(tickets, r, event_colors)
         if c:
             curves_html += f"<div class='chart-box'>{c}</div>"
 
@@ -1150,6 +1251,11 @@ def render() -> str:
                 padding: 7px 9px; margin-top: 8px; }}
   .mkt-line {{ font-size: 14px; margin: 10px 0 2px; }}
   .rec-list {{ margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: #334155; line-height: 1.6; }}
+  table.rec-table {{ margin-bottom: 8px; }}
+  table.rec-table td {{ vertical-align: top; }}
+  table.rec-table .rec-sub {{ display: block; color: #94a3b8; font-size: 11px; font-weight: 400; margin-top: 2px; }}
+  td.rec-do {{ font-size: 12.5px; color: #334155; max-width: 300px; line-height: 1.45; }}
+  .rec-surge-note {{ font-size: 11px; color: #92400e; margin-top: 4px; }}
   @media (max-width: 820px) {{ .rec-grid {{ grid-template-columns: 1fr; }} }}
   code.ik {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
               background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #475569; }}
