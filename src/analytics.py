@@ -473,8 +473,17 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
     if not_started:
         eligible = eligible.sort_values("date", ascending=False).head(n_recent)
 
-    # For each comparable: tickets sold from days_out onward = final - cum_at_stage,
-    # plus the share of final sold in the last SURGE_WINDOW_DAYS (the week-of surge).
+    # How long THIS event has been on sale. We align comparables by *days on sale* (elapsed
+    # selling time), NOT by days-before-event: past runs launched anywhere from ~17 to ~54 days
+    # out, so "tickets remaining after this many days BEFORE the event" unfairly credits a late
+    # launch with the early-bird sales an early launch had already banked. Aligning on days-on-
+    # sale asks the right question — "from the same point in its selling life, how much more did
+    # a comparable sell?" — which stops early launchers from dragging the forecast down.
+    target_curve = sales_curve(tickets, target_key)
+    target_dos = max(0, int(target_curve["days_before_event"].max() - days_out)) if not target_curve.empty else 0
+
+    # For each comparable: tickets sold from the equivalent days-on-sale point onward
+    # (= final - cum_at_stage), plus the share of final sold in the last SURGE_WINDOW_DAYS.
     remaining_vals = []
     final_vals = []
     surge_shares = []
@@ -486,7 +495,15 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         final = int(curve["tickets_cum"].iloc[-1])
         if final <= 0:
             continue
-        at_stage = curve[curve["days_before_event"] >= days_out]
+        # Equivalent stage. Two analogs of "where our event is now": event-proximity (days_out)
+        # and elapsed selling time (comp_launch - target_dos). We start counting the comparable's
+        # remaining from whichever is FURTHER from the event (larger days-before-event), i.e. the
+        # fuller run. days_out alone undercounts a LATE launch (early launchers had already banked
+        # their early-bird sales); days-on-sale alone undercounts an EARLY launch whose late-
+        # launching comparables had already finished selling. The max() reconciles both.
+        comp_launch = int(curve["days_before_event"].max())
+        ref_dbe = max(days_out, comp_launch - target_dos)
+        at_stage = curve[curve["days_before_event"] >= ref_dbe]
         cum_at_stage = int(at_stage["tickets_cum"].max()) if not at_stage.empty else 0
         remaining = final - cum_at_stage
         remaining_vals.append(remaining)
@@ -531,9 +548,10 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         forecast = int(current_sold + median_remaining)
         low = int(current_sold + _pct(remaining_sorted, 0.25))
         high = int(current_sold + _pct(remaining_sorted, 0.75))
-        basis = "remaining-from-stage"
+        basis = "remaining-from-equivalent-days-on-sale"
         band_lbl = (f"in ${lo:.0f}-${hi:.0f} band" if lo is not None else "same-series")
-        method = f"current sold + median remaining from n={len(remaining_vals)} comparables {band_lbl}"
+        method = (f"current sold + median remaining from n={len(remaining_vals)} comparables "
+                  f"at equal days-on-sale ({target_dos}d) {band_lbl}")
 
     # Week-of surge: historically what % of an event's final sales land in the last week.
     surge_share = statistics.median(surge_shares) if surge_shares else 0.0
@@ -550,6 +568,7 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         "n_comparables": len(remaining_vals),
         "basis": basis,
         "method": method,
+        "days_on_sale": target_dos,
         "comparables": sorted(used, key=lambda c: (not c["same_series"], -c["final"])),
         "target_price": target_price,
         "price_band": (round(lo, 0), round(hi, 0)) if lo is not None else None,
