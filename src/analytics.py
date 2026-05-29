@@ -293,9 +293,7 @@ def event_summary(tickets: pd.DataFrame, capacities: pd.DataFrame, waitlist: pd.
             forecast_lows.append(fc.get("low"))
             forecast_highs.append(fc.get("high"))
             if fc.get("forecast") is not None:
-                pb = fc.get("price_band")
-                band_lbl = (f"in ${pb[0]:.0f}-${pb[1]:.0f} band" if pb else "same-series")
-                forecast_methods.append(f"median of n={fc['n_comparables']} comparables {band_lbl}")
+                forecast_methods.append(fc.get("method", f"median of n={fc['n_comparables']} comparables"))
             else:
                 forecast_methods.append(fc.get("reason", "n/a"))
             surge_shares.append(fc.get("surge_share"))
@@ -405,7 +403,8 @@ def _series_tokens(name: str) -> set[str]:
 
 
 def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
-                           price_band_pct: float = 0.6, min_final: int = 150) -> dict:
+                           price_band_pct: float = 0.6, min_final: int = 150,
+                           n_recent: int = 5) -> dict:
     """Forecast the final ticket count for an upcoming event using comparable past events.
 
     Method: find past comparable paid events (same series by name overlap, OR within
@@ -465,9 +464,19 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         return {"forecast": None, "reason": f"no past events in {band_txt} with ≥{min_final} tickets"}
     eligible["same_series"] = eligible["name"].apply(lambda n: bool(target_tokens & _series_tokens(n)))
 
+    # Not-yet-on-sale events (waitlist/pre-sale, 0 sold) have no trajectory to extend, and
+    # "tickets remaining from this stage" is distorted by how front- vs back-loaded each past
+    # event was. Series like The Blend also scale up over time, so a stale first-run instance
+    # shouldn't anchor the forecast. For these we project from the TYPICAL FINAL of the most
+    # recent comparables (same window the pace flag uses) instead.
+    not_started = current_sold == 0
+    if not_started:
+        eligible = eligible.sort_values("date", ascending=False).head(n_recent)
+
     # For each comparable: tickets sold from days_out onward = final - cum_at_stage,
     # plus the share of final sold in the last SURGE_WINDOW_DAYS (the week-of surge).
     remaining_vals = []
+    final_vals = []
     surge_shares = []
     used = []
     for _, c in eligible.iterrows():
@@ -481,6 +490,7 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         cum_at_stage = int(at_stage["tickets_cum"].max()) if not at_stage.empty else 0
         remaining = final - cum_at_stage
         remaining_vals.append(remaining)
+        final_vals.append(final)
         # Final-week surge: tickets sold in the last SURGE_WINDOW_DAYS / final
         at_surge = curve[curve["days_before_event"] >= SURGE_WINDOW_DAYS]
         cum_at_surge = int(at_surge["tickets_cum"].max()) if not at_surge.empty else 0
@@ -498,12 +508,32 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
         return {"forecast": None, "reason": "no usable comparables"}
 
     import statistics
-    remaining_sorted = sorted(remaining_vals)
-    median_remaining = statistics.median(remaining_sorted)
-    n = len(remaining_sorted)
-    p25 = remaining_sorted[max(0, n // 4)]
-    p75 = remaining_sorted[min(n - 1, (3 * n) // 4)]
-    forecast = int(current_sold + median_remaining)
+    def _pct(sorted_vals, frac):
+        m = len(sorted_vals)
+        idx = min(m - 1, max(0, int(frac * m)))
+        return sorted_vals[idx]
+
+    if not_started:
+        # Project from the typical FINAL of recent comparables (no current trajectory to extend).
+        finals_sorted = sorted(final_vals)
+        median_final = statistics.median(finals_sorted)
+        forecast = int(round(median_final))
+        low = int(_pct(finals_sorted, 0.25))
+        high = int(_pct(finals_sorted, 0.75))
+        median_remaining = int(median_final)  # = forecast since current_sold is 0
+        basis = "recent-finals"
+        method = (f"median final of n={len(final_vals)} recent comparables "
+                  f"(event not yet on sale — projecting to series' typical finish)")
+    else:
+        # Extend the current trajectory: current sold + how much comparables sold from here on.
+        remaining_sorted = sorted(remaining_vals)
+        median_remaining = statistics.median(remaining_sorted)
+        forecast = int(current_sold + median_remaining)
+        low = int(current_sold + _pct(remaining_sorted, 0.25))
+        high = int(current_sold + _pct(remaining_sorted, 0.75))
+        basis = "remaining-from-stage"
+        band_lbl = (f"in ${lo:.0f}-${hi:.0f} band" if lo is not None else "same-series")
+        method = f"current sold + median remaining from n={len(remaining_vals)} comparables {band_lbl}"
 
     # Week-of surge: historically what % of an event's final sales land in the last week.
     surge_share = statistics.median(surge_shares) if surge_shares else 0.0
@@ -513,10 +543,13 @@ def forecast_final_tickets(tickets: pd.DataFrame, event_row: pd.Series,
 
     return {
         "forecast": forecast,
-        "low": int(current_sold + p25),
-        "high": int(current_sold + p75),
+        "low": low,
+        "high": high,
         "median_remaining": int(median_remaining),
+        "median_final": int(statistics.median(sorted(final_vals))),
         "n_comparables": len(remaining_vals),
+        "basis": basis,
+        "method": method,
         "comparables": sorted(used, key=lambda c: (not c["same_series"], -c["final"])),
         "target_price": target_price,
         "price_band": (round(lo, 0), round(hi, 0)) if lo is not None else None,
