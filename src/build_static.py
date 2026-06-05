@@ -216,7 +216,7 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
                                  tickets: pd.DataFrame) -> str:
     """Top-of-dashboard 'what lever to pull' recommendation for each behind-pace upcoming event,
     plus the proven content formats worth replicating."""
-    from src.marketing import current_organic_pace, current_pace, recommended_daily_spend, _event_series
+    from src.marketing import current_organic_pace, current_pace, recommended_daily_spend
 
     upcoming = summary[summary["status"] != "past"].copy()
     if upcoming.empty:
@@ -371,64 +371,16 @@ def build_recommendations_banner(summary: pd.DataFrame, marketing_table: pd.Data
           <td class="rec-do">{rec_short}{surge_note}</td>
         </tr>""")
 
-    # Content to try this week: for each upcoming event, the posts that worked best for THAT
-    # event's series (its own past instances), so suggestions are event-specific rather than a
-    # single global highest-reach list. Rendered as compact table rows grouped per event.
-    def _post_cells(p):
-        ch = "IG" if p["channel"] == "instagram_organic" else "TikTok"
-        cap = (p["caption"][:70] + "…") if len(p["caption"]) > 70 else p["caption"]
-        cap = cap.replace("\n", " ")
-        link = f" <a href='{p['url']}' target='_blank' rel='noopener'>↗</a>" if p.get("url") else ""
-        return (f"<td class='num' style='white-space:nowrap'>{int(p['views']):,}</td>"
-                f"<td style='white-space:nowrap'>{ch}</td>"
-                f"<td class='post-caption'>@{p.get('owner','')} — {cap}{link}</td>")
-
-    content_rows = []
-    if not attributed_posts.empty:
-        ap = attributed_posts.copy()
-        if "is_ambiguous" in ap.columns:
-            ap = ap[ap["is_ambiguous"] != True]  # don't suggest posts still pending review
-        for _, r in upcoming.sort_values("event_instance_date").iterrows():
-            ik = str(r["instance_key"])
-            series = _event_series(r["event_name"])
-            same = ap[ap["instance_key"].astype(str) == ik]
-            if series:
-                same = pd.concat([same, ap[ap["series"] == series]]).drop_duplicates(subset=["post_id"])
-            same = same.sort_values("views", ascending=False).head(3)
-            date_str = pd.to_datetime(r["event_instance_date"]).strftime("%b %-d")
-            if not same.empty:
-                posts = list(same.iterrows())
-                note = ""
-            else:
-                # First-ever event of its kind: fall back to top formats across all events
-                fb = ap.sort_values("views", ascending=False).head(3)
-                if fb.empty:
-                    continue
-                posts = list(fb.iterrows())
-                note = "<span class='rec-sub'>top across all events</span>"
-            for i, (_, p) in enumerate(posts):
-                ev_cell = (f"<td class='ev-name' rowspan='{len(posts)}' style='border-left:4px solid #6366f1'>"
-                           f"{r['event_name']}<span class='rec-sub'>{date_str}</span>{note}</td>") if i == 0 else ""
-                content_rows.append(f"<tr>{ev_cell}{_post_cells(p)}</tr>")
-
-    if not rec_rows and not content_rows:
+    if not rec_rows:
         return ""
-    out = '<h2 style="margin-top:0">🎯 What to dial up now</h2>'
-    if rec_rows:
-        out += f"""<table class="rec-table">
-          <thead><tr>
-            <th>Event</th><th>Pace</th><th>Sold → Forecast / Goal</th>
-            <th>Paid / day</th><th>Organic</th><th>Dial up</th>
-          </tr></thead>
-          <tbody>{"".join(rec_rows)}</tbody>
-        </table>"""
-    if content_rows:
-        out += '<h2>📸 Try these types of content over the next week</h2>'
-        out += f"""<table class="rec-table">
-          <thead><tr><th>Event</th><th class="num">Views</th><th>Ch</th><th>Top content that worked</th></tr></thead>
-          <tbody>{"".join(content_rows)}</tbody>
-        </table>"""
-    return out
+    return f"""<h2 style="margin-top:0">🎯 What to dial up now</h2>
+      <table class="rec-table">
+        <thead><tr>
+          <th>Event</th><th>Pace</th><th>Sold → Forecast / Goal</th>
+          <th>Paid / day</th><th>Organic</th><th>Dial up</th>
+        </tr></thead>
+        <tbody>{"".join(rec_rows)}</tbody>
+      </table>"""
 
 
 def build_review_queue(attributed_posts: pd.DataFrame, tickets: pd.DataFrame) -> str:
@@ -1063,7 +1015,6 @@ def render() -> str:
 
         # Forecast / gap (upcoming only)
         body = ""
-        comp_html = ""
         if is_upcoming:
             days = int(r["days_until_event"])
             forecast_text = (
@@ -1084,26 +1035,6 @@ def render() -> str:
                         f"<p><b>{gap:,} more tickets needed in {days} days</b> = {per_day:.0f}/day average</p>")
             else:
                 body = f"<p>{forecast_text} · {days} days out</p>"
-            fc_detail = forecast_final_tickets(tickets, r)
-            if fc_detail.get("comparables"):
-                comp_rows = ""
-                for c in fc_detail["comparables"]:
-                    star = " ⭐" if c["same_series"] else ""
-                    comp_rows += (
-                        f"<tr><td>{c['name']}{star}</td>"
-                        f"<td>{c['date'].strftime('%b %d, %Y')}</td>"
-                        f"<td class='num'>${int(c['mode_price'])}</td>"
-                        f"<td class='num'>{c['final']:,}</td>"
-                        f"<td class='num'>{c['cum_at_stage']:,} ({c['pct_at_stage']:.0f}%)</td>"
-                        f"<td class='num'><b>{c['remaining_from_stage']:,}</b></td></tr>"
-                    )
-                comp_html = f"""
-            <h4>Comparables used in this forecast</h4>
-            <table class="scenarios">
-              <thead><tr><th>Past event</th><th>Date</th><th>Price</th><th>Final</th><th>Sold by T-{days}d</th><th>Remaining from this stage</th></tr></thead>
-              <tbody>{comp_rows}</tbody>
-            </table>
-            {(f'<p class="caption">⭐ = same series. Not on sale yet — forecast = median final of these recent comparables = {fc_detail.get("forecast", 0):,} (these events also launched slow and back-loaded most sales into the final weeks).</p>' if fc_detail.get("basis") == "recent-finals" else f'<p class="caption">⭐ = same series. Forecast = current sold ({sold:,}) + median remaining from these comparables ({fc_detail.get("median_remaining", 0):,}) = {fc_detail.get("forecast", 0):,}.</p>')}"""
         else:
             att = f"{r['attendance_rate_pct']:.0f}% showed up" if pd.notna(r["attendance_rate_pct"]) else ""
             body = f"<p>Final: <b>{sold:,}</b> tickets · {int(r['attended_count'])} attended · {att} · {money(r['net_revenue'])} revenue</p>"
@@ -1116,7 +1047,6 @@ def render() -> str:
           {body}
           {mkt}
           {build_top_posts_block(attributed_posts, ik, n=5)}
-          {comp_html}
         </div>""")
         label = f"{'⏳ ' if is_upcoming else ''}{r['event_name']} ({date_str})"
         sel = " selected" if ik == default_key else ""
