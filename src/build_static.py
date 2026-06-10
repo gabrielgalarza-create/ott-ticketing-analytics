@@ -100,6 +100,65 @@ def build_velocity_chart(tickets: pd.DataFrame) -> str:
     return _chart(fig)
 
 
+def build_day_of_week_charts(tickets: pd.DataFrame) -> str:
+    """Two-up: avg tickets per event by EVENT day-of-week (past events, finalized),
+    and total tickets sold by ORDER day-of-week (when customers actually buy). All
+    timestamps converted to US/Pacific before taking day-of-week — events are PT-anchored
+    and UTC would push a 7pm-Saturday event into Sunday."""
+    if tickets.empty:
+        return ""
+    DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    PT = "US/Pacific"
+
+    # 1) Avg tickets per event by event day-of-week — past events only, so each event
+    # contributes its final number rather than a midstream count.
+    now = pd.Timestamp.now(tz="UTC")
+    past = tickets[tickets["event_instance_date"] < now]
+    if past.empty:
+        return ""
+    per_event = past.groupby("instance_key").agg(
+        event_date=("event_instance_date", "first"),
+        tickets=("id", "count"),
+    )
+    per_event["dow"] = per_event["event_date"].dt.tz_convert(PT).dt.day_name().str[:3]
+    by_event_dow = per_event.groupby("dow")["tickets"].agg(["mean", "count"]).reindex(DAYS).fillna(0)
+
+    fig1 = go.Figure(go.Bar(
+        x=DAYS, y=by_event_dow["mean"].round(0),
+        marker_color="#6366f1",
+        text=[f"n={int(c)}" if c else "—" for c in by_event_dow["count"]],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>avg %{y:.0f} tickets/event<br>%{text}<extra></extra>",
+    ))
+    fig1.update_layout(
+        height=320, title="Avg tickets per event — by event day-of-week (past events, PT)",
+        yaxis=dict(title="Tickets per event"), **CHART_LAYOUT,
+    )
+
+    # 2) Total tickets sold by order day-of-week (all orders, paid + free).
+    orders = tickets.copy()
+    orders["dow"] = orders["order_date"].dt.tz_convert(PT).dt.day_name().str[:3]
+    by_order_dow = orders.groupby("dow")["id"].count().reindex(DAYS).fillna(0).astype(int)
+    fig2 = go.Figure(go.Bar(
+        x=DAYS, y=by_order_dow.values,
+        marker_color="#0891b2",
+        text=[f"{v:,}" for v in by_order_dow.values],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>%{y:,} tickets sold<extra></extra>",
+    ))
+    fig2.update_layout(
+        height=320, title="Total tickets sold — by order day-of-week (all orders, PT)",
+        yaxis=dict(title="Tickets sold"), **CHART_LAYOUT,
+    )
+
+    return f"""
+    <div class="dow-grid">
+      <div class="chart-box">{_chart(fig1)}</div>
+      <div class="chart-box">{_chart(fig2)}</div>
+    </div>
+    <p class="caption">Left: which event-days draw the biggest crowds — informs new-event scheduling. Right: which days customers actually buy — informs ad spend timing and posting cadence.</p>"""
+
+
 def build_top_events_chart(tickets: pd.DataFrame) -> str:
     by_event = (
         tickets.groupby("event_name", as_index=False)
@@ -1096,6 +1155,7 @@ def render() -> str:
         </tr>"""
 
     top_html = build_top_events_chart(tickets)
+    dow_html = build_day_of_week_charts(tickets)
     marketing_efficiency_html = build_marketing_efficiency_table(marketing_table)
     marketing_pace_html = build_marketing_pace_chart(tickets, attributed_ads)
     campaign_breakdown_html = build_campaign_breakdown(attributed_ads, attributed_posts)
@@ -1193,6 +1253,8 @@ def render() -> str:
   td.rec-do {{ font-size: 12.5px; color: #334155; max-width: 300px; line-height: 1.45; }}
   .rec-surge-note {{ font-size: 11px; color: #92400e; margin-top: 4px; }}
   @media (max-width: 820px) {{ .rec-grid {{ grid-template-columns: 1fr; }} }}
+  .dow-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+  @media (max-width: 900px) {{ .dow-grid {{ grid-template-columns: 1fr; }} }}
   code.ik {{ font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px;
               background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #475569; }}
   .ch-badge {{ display: inline-block; background: #6366f1; color: #fff; padding: 2px 8px;
@@ -1290,6 +1352,9 @@ def render() -> str:
 
   <h2>Portfolio</h2>
   <div class="chart-box">{top_html}</div>
+
+  <h2>Sales by day of week</h2>
+  {dow_html}
 
   <h2>Past events</h2>
   <table>
