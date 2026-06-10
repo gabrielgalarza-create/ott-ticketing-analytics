@@ -38,6 +38,13 @@ jobs:
           SWEATPALS_HOST: https://ilove.sweatpals.com
         run: python -m src.sync
 
+      - name: Refresh marketing snapshots from Windsor.ai
+        # Soft-fails if WINDSOR_API_KEY is unset or the API errors — keeps committed snapshots
+        # so the dashboard still deploys with last-known data instead of breaking.
+        env:
+          WINDSOR_API_KEY: ${{ secrets.WINDSOR_API_KEY }}
+        run: python scripts/refresh_marketing_data.py
+
       - name: Build static dashboard
         run: python -m src.build_static
 
