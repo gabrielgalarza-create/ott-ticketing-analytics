@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,7 +26,8 @@ REPO = Path(__file__).resolve().parent.parent
 DATA = REPO / "data"
 BASE = "https://connectors.windsor.ai"
 DATE_PRESET = "last_2yearsT"
-TIMEOUT = 120
+TIMEOUT = 180
+MAX_TRIES = 3
 
 # Each connector's REST slug + the fields the dashboard's loaders expect. Keep these field
 # lists in lockstep with src/marketing.py:load_ads and src/social.py:{load_ig_posts,load_tiktok_posts}.
@@ -55,7 +57,8 @@ CONNECTORS = [
 
 
 def fetch(connector: dict, api_key: str) -> list[dict]:
-    """Hit Windsor REST API, return the row list (raises on HTTP error)."""
+    """Hit Windsor REST API, return the row list. Retries on timeout / 5xx (Meta's API is
+    flaky with 2-year date ranges and the upstream timeout cascades through Windsor)."""
     params = {
         "api_key": api_key,
         "fields": ",".join(connector["fields"]),
@@ -63,10 +66,25 @@ def fetch(connector: dict, api_key: str) -> list[dict]:
     }
     url = f"{BASE}/{connector['slug']}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        payload = json.loads(resp.read())
-    # Windsor's REST docs say `data`, but the MCP returns `result`. Accept either.
-    return payload.get("data") or payload.get("result") or []
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_TRIES + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                payload = json.loads(resp.read())
+            # Windsor's REST docs say `data`, but the MCP returns `result`. Accept either.
+            return payload.get("data") or payload.get("result") or []
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == MAX_TRIES:
+                raise
+            last_exc = e
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            if attempt == MAX_TRIES:
+                raise
+            last_exc = e
+        backoff = 5 * attempt  # 5s, 10s
+        print(f"[refresh-marketing]   {connector['name']}: attempt {attempt} failed ({last_exc}) — retrying in {backoff}s")
+        time.sleep(backoff)
+    return []  # unreachable
 
 
 def main() -> int:
