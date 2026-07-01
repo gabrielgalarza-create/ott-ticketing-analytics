@@ -1180,6 +1180,12 @@ def render() -> str:
   header {{ background: #0f172a; color: #fff; padding: 28px 40px; }}
   header h1 {{ margin: 0; font-size: 24px; }}
   header .updated {{ color: #94a3b8; font-size: 13px; margin-top: 6px; }}
+  header .h-row {{ display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; }}
+  header .refresh-btn {{ display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px;
+                         background: #6366f1; color: #fff; border-radius: 8px; font-size: 13px;
+                         font-weight: 600; text-decoration: none; transition: background .15s; }}
+  header .refresh-btn:hover {{ background: #4f46e5; }}
+  header .refresh-hint {{ color: #64748b; font-size: 11px; margin-top: 4px; text-align: right; }}
   main {{ max-width: 1200px; margin: 0 auto; padding: 28px 40px 60px; }}
   h2 {{ font-size: 17px; margin: 36px 0 14px; color: #0f172a;
         border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }}
@@ -1289,8 +1295,19 @@ def render() -> str:
 </head>
 <body>
 <header>
-  <h1>OTT Ticketing Dashboard</h1>
-  <div class="updated">Auto-updated {updated} &nbsp;·&nbsp; data from SweatPals</div>
+  <div class="h-row">
+    <div>
+      <h1>OTT Ticketing Dashboard</h1>
+      <div class="updated">Auto-updated {updated} &nbsp;·&nbsp; data from SweatPals</div>
+    </div>
+    <div style="text-align:right">
+      <a class="refresh-btn" href="https://github.com/gabrielgalarza-create/ott-ticketing-analytics/actions/workflows/deploy.yml"
+         target="_blank" rel="noopener" title="Opens GitHub Actions — click 'Run workflow' there to trigger a fresh sync + rebuild (~4 min)">
+        ↻ Refresh data
+      </a>
+      <div class="refresh-hint">Opens GitHub · click "Run workflow" · ~4 min to redeploy</div>
+    </div>
+  </div>
 </header>
 <main>
   <div class="cards">{cards_html}</div>
